@@ -77,7 +77,7 @@ import pandas as pd
 
 ENCODINGS = ('utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1')
 
-DEFAULT_META = ['WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME',
+DEFAULT_META = ['WFR_ID', 'WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME',
                 'STEP', 'STEP_ID', 'RECIPE', 'CHAMBER', 'EQP_ID', 'TOOL_ID',
                 'TIME', 'TIMESTAMP', 'label', 'LABEL']
 

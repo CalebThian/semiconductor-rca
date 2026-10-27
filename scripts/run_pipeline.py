@@ -76,7 +76,7 @@ def fmt_table(df, left_cols=()):
         out.append('  '.join(cells))
     return '\n'.join(out)
 
-DEFAULT_META = ['WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME',
+DEFAULT_META = ['WFR_ID', 'WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME',
                 'STEP', 'STEP_ID', 'RECIPE', 'CHAMBER', 'EQP_ID', 'TOOL_ID',
                 'TIME', 'TIMESTAMP', 'label', 'LABEL']
 
@@ -803,8 +803,36 @@ def main():
                     sys.exit('所有參數的缺值都超過 %.0f%%，無可用欄位。'
                              '請調低 data.drop_col_na_frac 或檢查資料。' % (100 * thr))
 
+        # 列刪除在高維下會崩潰：每欄只缺少數百分比，但「整列都沒有缺值」
+        # 的機率是各欄的乘積。299 欄中有 46 欄各缺 6.7%，存活率就只剩
+        # (1-0.067)^46 ≈ 4%。drop_col_na_frac 只攔單欄嚴重的，攔不住這種
+        # 累積效應，所以要先算存活率再決定。
         keep = raw[sensor_cols + [dc['label_col']]].notna().all(axis=1)
         n_drop = int((~keep).sum())
+        surv = 1.0 - n_drop / float(max(n_before, 1))
+        max_loss = float(dc.get('max_row_loss', 0.3))
+        if n_drop and surv < 1.0 - max_loss:
+            na_frac2 = raw[sensor_cols].isna().mean()
+            culprits = na_frac2[na_frac2 > 0].sort_values(ascending=False)
+            emit('  ❌ 丟列會移除 %d / %d 列（%.1f%%），只剩 %d 列。'
+                 % (n_drop, n_before, 100.0 * n_drop / max(n_before, 1),
+                    n_before - n_drop))
+            emit('     原因不是單一欄位嚴重，而是 %d 個欄位各有少量缺值，'
+                 % int((na_frac2 > 0).sum()))
+            emit('     「整列無缺值」的機率是各欄存活率的乘積。')
+            emit('     缺值最多的幾個欄位：')
+            for c, v in culprits.head(8).items():
+                emit('       %-28s %5.1f%%' % (str(c)[:28], 100.0 * v))
+            emit('')
+            emit('     三個選項：')
+            emit('       1. 調低 data.drop_col_na_frac（目前 %.2f），'
+                 '改以丟欄為主' % thr)
+            emit('       2. data.dropna = "none"，保留缺值'
+                 '（聚合時自動略過，但各 wafer 的平均用的點數不同）')
+            emit('       3. 調高 data.max_row_loss（目前 %.2f），'
+                 '明確接受這個損失' % max_loss)
+            sys.exit('丟列損失超過 max_row_loss，已中止以免在殘餘資料上'
+                     '產生看似正常但無意義的結果。')
         if n_drop:
             # 丟列可能不均勻地砍掉某一類，須回報前後的類別組成
             lab_b = raw[dc['label_col']].astype(str).value_counts()
@@ -1124,262 +1152,282 @@ def main():
                  % (len(itr), int(ytr.sum()), len(ite), int(yte.sum())))
 
             stump = {}
+            n_cand_nm = 0
             for grp in groups_named:
                 for nm in grp:
+                    n_cand_nm += 1
                     b = best_stump(Xtr[:, names.index(nm)], ytr,
                                    rc['n_quantile'])
                     if b:
                         stump[nm] = (b[0], b[1])
 
-            # --- 逐組序貫選擇（增益不足即停止） ---
-            gm = rc.get('gain_metric', 'F1')
-            min_gain = rc.get('min_gain', 0.02)
-            # 同組組合搜尋：實測增益有限，預設關閉；程式碼保留供日後評估
-            do_ext = rc.get('extend', False)
-            emit('  逐組加入條件（下表數字皆為訓練集；'
-                 '以 %s 判斷增益，門檻 %.3f）%s'
-                 % (gm, min_gain,
-                    '；條件數 <= %d 時於同組內枚舉組合'
-                    % rc.get('extend_when', 1) if do_ext else ''))
-            emit('  註：合取條件只會使解釋比例下降、精確率上升，'
-                 '故不以解釋比例當增益指標。')
-            g_of = {nm: gi for gi, grp in enumerate(groups_named, 1)
-                    for nm in grp}
-            conds, path, cur = [], [], None
-            for gi, grp in enumerate(groups_named, 1):
-                cs = [nm for nm in grp if nm in stump]
-                if not cs:
-                    continue
-                trial = []
-                for nm in cs:
-                    cd = conds + [(nm, stump[nm][0], stump[nm][1])]
-                    trial.append((nm, eval_rule(apply_rule(Xtr, names, cd),
-                                                ytr), cd))
-                nm, ev, cd = max(trial, key=lambda x: x[1][gm])
-                gain = ev[gm] if cur is None else ev[gm] - cur[gm]
-                ok = cur is None or gain >= min_gain
-                path.append({'階段': '序貫', '步驟': len(path) + 1, '組': gi,
-                             '選用參數': nm,
-                             '條件': '%s %.4g' % (stump[nm][0], stump[nm][1]),
-                             '訓練解釋比例': ev['解釋比例'],
-                             '訓練誤報率': ev['誤報率'],
-                             '訓練' + gm: ev[gm], '增益': round(gain, 3),
-                             '採納': '是' if ok else '否（增益不足，停止）'})
-                if not ok:
-                    break
-                conds, cur = cd, ev
+            # 沒有任何可用的切點時必須停在這裡。先前會繼續走完，印出
+            # 「採用 0 個條件：當  時判定為異常」並算出一個 F1 ——
+            # 那條規則沒有任何條件，等於把全部 wafer 判為異常。
+            if not stump:
+                emit('')
+                emit('  ❌ %d 個候選參數都無法產生切點，規則萃取中止。'
+                     % n_cand_nm)
+                emit('     best_stump 需要訓練集至少 10 個有效值、且該參數'
+                     '至少有 2 個不同值、')
+                emit('     正負兩類都存在。目前訓練集 %d 片（異常 %d）。'
+                     % (len(itr), int(ytr.sum())))
+                emit('     wafer 數過少時請檢查步驟 1 的 NA 處理是否'
+                     '砍掉了大量資料。')
+                RESULT.setdefault('rule', {})['aborted'] = \
+                    'no usable stump (train=%d, abnormal=%d)' % (
+                        len(itr), int(ytr.sum()))
+            else:
 
-            # 同組組合搜尋：序貫只採納少數條件時，於該組內枚舉組合。
-            # 用於分辨真根因是集中在同一組，還是分散在不同組。
-            ext_when = rc.get('extend_when', 1)
-            ext_max = rc.get('extend_max_add', 2)
-            if do_ext and cur is not None and len(conds) > ext_when:
-                emit('  （同組組合搜尋未執行：序貫已採納 %d 個條件，'
-                     '超過 extend_when=%d）' % (len(conds), ext_when))
-            if do_ext and cur is not None and len(conds) <= ext_when:
-                base_nm = conds[-1][0]
-                gi = g_of[base_nm]
-                others = [nm for nm in groups_named[gi - 1]
-                          if nm in stump and nm not in {c[0] for c in conds}]
-                if not others:
-                    emit('  （同組組合搜尋未執行：條件 %s 所屬的第 %d 組 [%s] '
-                         '沒有其他可用參數）'
-                         % (base_nm, gi, ','.join(groups_named[gi - 1])))
-                else:
-                    rows_e = []
-                    for r in range(1, min(ext_max, len(others)) + 1):
-                        for add in itertools.combinations(others, r):
-                            cd = conds + [(nm, stump[nm][0], stump[nm][1])
-                                          for nm in add]
-                            ev = eval_rule(apply_rule(Xtr, names, cd), ytr)
-                            evt = eval_rule(apply_rule(Xte, names, cd), yte)
-                            rows_e.append({'加入參數': ' + '.join(add),
-                                           '條件數': len(cd),
-                                           '訓練解釋比例': ev['解釋比例'],
-                                           '訓練誤報率': ev['誤報率'],
-                                           '訓練' + gm: ev[gm],
-                                           '增益': round(ev[gm] - cur[gm], 3),
-                                           '驗證' + gm: evt[gm],
-                                           '_cd': cd, '_ev': ev})
-                    et = pd.DataFrame(rows_e).sort_values('增益',
-                                                          ascending=False)
-                    emit('')
-                    emit('  同組組合搜尋（條件數 %d <= %d，於第 %d 組內枚舉）：'
-                         % (len(conds), ext_when, gi))
-                    emit(fmt_table(et.drop(columns=['_cd', '_ev']),
-                                   left_cols=('加入參數',)))
-                    top = et.iloc[0]
-                    if top['增益'] >= min_gain:
-                        path.append({'階段': '同組組合',
-                                     '步驟': len(path) + 1, '組': gi,
-                                     '選用參數': top['加入參數'],
-                                     '條件': '(見上表)',
-                                     '訓練解釋比例': top['_ev']['解釋比例'],
-                                     '訓練誤報率': top['_ev']['誤報率'],
-                                     '訓練' + gm: top['_ev'][gm],
-                                     '增益': top['增益'], '採納': '是'})
-                        conds, cur = top['_cd'], top['_ev']
-                        emit('  → 採納：加入 %s。真根因可能集中於第 %d 組。'
-                             % (top['加入參數'], gi))
+                # --- 逐組序貫選擇（增益不足即停止） ---
+                gm = rc.get('gain_metric', 'F1')
+                min_gain = rc.get('min_gain', 0.02)
+                # 同組組合搜尋：實測增益有限，預設關閉；程式碼保留供日後評估
+                do_ext = rc.get('extend', False)
+                emit('  逐組加入條件（下表數字皆為訓練集；'
+                     '以 %s 判斷增益，門檻 %.3f）%s'
+                     % (gm, min_gain,
+                        '；條件數 <= %d 時於同組內枚舉組合'
+                        % rc.get('extend_when', 1) if do_ext else ''))
+                emit('  註：合取條件只會使解釋比例下降、精確率上升，'
+                     '故不以解釋比例當增益指標。')
+                g_of = {nm: gi for gi, grp in enumerate(groups_named, 1)
+                        for nm in grp}
+                conds, path, cur = [], [], None
+                for gi, grp in enumerate(groups_named, 1):
+                    cs = [nm for nm in grp if nm in stump]
+                    if not cs:
+                        continue
+                    trial = []
+                    for nm in cs:
+                        cd = conds + [(nm, stump[nm][0], stump[nm][1])]
+                        trial.append((nm, eval_rule(apply_rule(Xtr, names, cd),
+                                                    ytr), cd))
+                    nm, ev, cd = max(trial, key=lambda x: x[1][gm])
+                    gain = ev[gm] if cur is None else ev[gm] - cur[gm]
+                    ok = cur is None or gain >= min_gain
+                    path.append({'階段': '序貫', '步驟': len(path) + 1, '組': gi,
+                                 '選用參數': nm,
+                                 '條件': '%s %.4g' % (stump[nm][0], stump[nm][1]),
+                                 '訓練解釋比例': ev['解釋比例'],
+                                 '訓練誤報率': ev['誤報率'],
+                                 '訓練' + gm: ev[gm], '增益': round(gain, 3),
+                                 '採納': '是' if ok else '否（增益不足，停止）'})
+                    if not ok:
+                        break
+                    conds, cur = cd, ev
+
+                # 同組組合搜尋：序貫只採納少數條件時，於該組內枚舉組合。
+                # 用於分辨真根因是集中在同一組，還是分散在不同組。
+                ext_when = rc.get('extend_when', 1)
+                ext_max = rc.get('extend_max_add', 2)
+                if do_ext and cur is not None and len(conds) > ext_when:
+                    emit('  （同組組合搜尋未執行：序貫已採納 %d 個條件，'
+                         '超過 extend_when=%d）' % (len(conds), ext_when))
+                if do_ext and cur is not None and len(conds) <= ext_when:
+                    base_nm = conds[-1][0]
+                    gi = g_of[base_nm]
+                    others = [nm for nm in groups_named[gi - 1]
+                              if nm in stump and nm not in {c[0] for c in conds}]
+                    if not others:
+                        emit('  （同組組合搜尋未執行：條件 %s 所屬的第 %d 組 [%s] '
+                             '沒有其他可用參數）'
+                             % (base_nm, gi, ','.join(groups_named[gi - 1])))
                     else:
-                        emit('  → 最佳組合增益 %.3f 未達門檻 %.3f，維持原規則。'
-                             % (top['增益'], min_gain))
-                        emit('  → 真根因可能不集中於第 %d 組。' % gi)
-            emit('')
-            emit(fmt_table(pd.DataFrame(path),
-                           left_cols=('階段', '選用參數', '條件', '採納')))
-            seq_conds = list(conds)      # 另存：下方列舉迴圈會重用 conds
-            seq_tr = eval_rule(apply_rule(Xtr, names, seq_conds), ytr)
-            seq_te = eval_rule(apply_rule(Xte, names, seq_conds), yte)
-            emit('')
-            emit('  採用 %d 個條件：當 %s 時判定為異常'
-                 % (len(seq_conds),
-                    ' 且 '.join('%s %s %.4g' % c for c in seq_conds)))
-            emit('  驗證集：解釋 %d／未解釋 %d（%.1f%%），誤報 %d（%.1f%%），'
-                 'F1 %.3f'
-                 % (seq_te['解釋數'], seq_te['未解釋數'],
-                    100 * seq_te['解釋比例'], seq_te['誤報數'],
-                    100 * seq_te['誤報率'], seq_te['F1']))
-
-            # enum_truncate=False 時，方案 B 評估完整長度的組合（不早停），
-            # 使其真正補足方案 A —— 兩者都截斷時結果會大量重複。
-            enum_trunc = rc.get('enum_truncate', True)
-            # max_per_group > 1 時，每組可取 1~m 個參數，使同組配對納入
-            # 正規枚舉。一組一個原是為避免冗餘（同組參數彼此相關），
-            # 但真根因有時集中在同一組，該情形下一組一個的空間有缺口。
-            mpg = max(1, int(rc.get('max_per_group', 1)))
-            opts = []
-            for g in groups_named:
-                gm_ = [nm for nm in g if nm in stump]
-                sub = []
-                for r in range(1, min(mpg, len(gm_)) + 1):
-                    sub.extend(itertools.combinations(gm_, r))
-                opts.append(sub or [()])
-            n_combo = int(np.prod([len(o) for o in opts]))
-            if mpg > 1:
-                emit('  每組可取 1~%d 個參數，組合數 %d' % (mpg, n_combo))
-                if n_combo > rc['max_combo']:
-                    emit('  ⚠️ 超過 max_combo %d，退回每組一個。'
-                         % rc['max_combo'])
-                    opts = [[(nm,) for nm in g if nm in stump] or [()]
-                            for g in groups_named]
-            rows = enumerate_rules(
-                opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
-                enum_trunc, prune=rc.get('enum_prune', True),
-                max_rows=int(rc.get('enum_max_rows', 20000)), emit=emit,
-                stats=_ENUM)
-            _ENUM['combos'] = n_combo
-            if rows:
-                rt = pd.DataFrame(rows).sort_values('驗證F1', ascending=False)
-                rt.to_csv('%s_rules.csv' % prefix, index=False,
-                          encoding='utf-8-sig')
+                        rows_e = []
+                        for r in range(1, min(ext_max, len(others)) + 1):
+                            for add in itertools.combinations(others, r):
+                                cd = conds + [(nm, stump[nm][0], stump[nm][1])
+                                              for nm in add]
+                                ev = eval_rule(apply_rule(Xtr, names, cd), ytr)
+                                evt = eval_rule(apply_rule(Xte, names, cd), yte)
+                                rows_e.append({'加入參數': ' + '.join(add),
+                                               '條件數': len(cd),
+                                               '訓練解釋比例': ev['解釋比例'],
+                                               '訓練誤報率': ev['誤報率'],
+                                               '訓練' + gm: ev[gm],
+                                               '增益': round(ev[gm] - cur[gm], 3),
+                                               '驗證' + gm: evt[gm],
+                                               '_cd': cd, '_ev': ev})
+                        et = pd.DataFrame(rows_e).sort_values('增益',
+                                                              ascending=False)
+                        emit('')
+                        emit('  同組組合搜尋（條件數 %d <= %d，於第 %d 組內枚舉）：'
+                             % (len(conds), ext_when, gi))
+                        emit(fmt_table(et.drop(columns=['_cd', '_ev']),
+                                       left_cols=('加入參數',)))
+                        top = et.iloc[0]
+                        if top['增益'] >= min_gain:
+                            path.append({'階段': '同組組合',
+                                         '步驟': len(path) + 1, '組': gi,
+                                         '選用參數': top['加入參數'],
+                                         '條件': '(見上表)',
+                                         '訓練解釋比例': top['_ev']['解釋比例'],
+                                         '訓練誤報率': top['_ev']['誤報率'],
+                                         '訓練' + gm: top['_ev'][gm],
+                                         '增益': top['增益'], '採納': '是'})
+                            conds, cur = top['_cd'], top['_ev']
+                            emit('  → 採納：加入 %s。真根因可能集中於第 %d 組。'
+                                 % (top['加入參數'], gi))
+                        else:
+                            emit('  → 最佳組合增益 %.3f 未達門檻 %.3f，維持原規則。'
+                                 % (top['增益'], min_gain))
+                            emit('  → 真根因可能不集中於第 %d 組。' % gi)
                 emit('')
-                # --- 最終採用：以訓練集指標決定，驗證集僅用於報告 ---
-                # 兩種搜尋的空間互不包含：列舉窮舉「一組一個」的所有組合，
-                # 序貫在同一空間走貪心路徑但另可走同組配對。故各有盲點，
-                # 任一方都可能較好。
-                # 以訓練集決定採用者 —— 若改看驗證集挑，等於對驗證集過擬合，
-                # 其數字將不再是無偏的效能估計。
-                enum_best = rt.iloc[0]
+                emit(fmt_table(pd.DataFrame(path),
+                               left_cols=('階段', '選用參數', '條件', '採納')))
+                seq_conds = list(conds)      # 另存：下方列舉迴圈會重用 conds
+                seq_tr = eval_rule(apply_rule(Xtr, names, seq_conds), ytr)
+                seq_te = eval_rule(apply_rule(Xte, names, seq_conds), yte)
                 emit('')
-                emit('  最終採用（依訓練集 %s 決定）：' % gm)
-                emit('    序貫      訓練 %.3f ／ 驗證 %.3f'
-                     % (seq_tr[gm], seq_te[gm]))
-                emit('    全組合最佳 訓練 %.3f ／ 驗證 %.3f'
-                     % (enum_best['訓練F1'], enum_best['驗證F1']))
-                if enum_best['訓練F1'] > seq_tr[gm]:
-                    final_rule = enum_best['規則']
-                    final_te = {'F1': enum_best['驗證F1'],
-                                '解釋數': enum_best['驗證解釋數'],
-                                '未解釋數': enum_best['驗證未解釋數'],
-                                '解釋比例': enum_best['驗證解釋比例'],
-                                '誤報數': enum_best['驗證誤報數'],
-                                '誤報率': enum_best['驗證誤報率']}
-                    emit('    → 採用全組合最佳')
-                else:
-                    final_rule = ' 且 '.join('%s %s %.4g' % c
-                                             for c in seq_conds)
-                    final_te = seq_te
-                    emit('    → 採用序貫')
-                emit('    規則：當 %s 時判定為異常' % final_rule)
-                emit('    驗證集：解釋 %d／未解釋 %d（%.1f%%），'
-                     '誤報 %d（%.1f%%），F1 %.3f'
-                     % (final_te['解釋數'], final_te['未解釋數'],
-                        100 * final_te['解釋比例'], final_te['誤報數'],
-                        100 * final_te['誤報率'], final_te['F1']))
+                emit('  採用 %d 個條件：當 %s 時判定為異常'
+                     % (len(seq_conds),
+                        ' 且 '.join('%s %s %.4g' % c for c in seq_conds)))
+                emit('  驗證集：解釋 %d／未解釋 %d（%.1f%%），誤報 %d（%.1f%%），'
+                     'F1 %.3f'
+                     % (seq_te['解釋數'], seq_te['未解釋數'],
+                        100 * seq_te['解釋比例'], seq_te['誤報數'],
+                        100 * seq_te['誤報率'], seq_te['F1']))
 
-                RESULT['rule'] = {
-                    'path': path,
-                    'seq_rule': ' 且 '.join('%s %s %.4g' % c
-                                           for c in seq_conds),
-                    'enum_top': rt.drop(columns=['規則']).head(5)
-                                  .to_dict(orient='records'),
-                    'enum_truncate': bool(enum_trunc),
-                    'max_per_group': mpg,
-                    'enum_rule': str(enum_best['規則']),
-                    'final_rule': final_rule,
-                    'final_source': ('全組合' if enum_best['訓練F1'] >
-                                     seq_tr[gm] else '序貫'),
-                    'metric': gm,
-                    'seq': {'train': seq_tr[gm], 'test': seq_te[gm]},
-                    'enum': {'train': float(enum_best['訓練F1']),
-                             'test': float(enum_best['驗證F1'])},
-                    'test': {k: (float(v) if isinstance(v, (int, float))
-                                 else v)
-                             for k, v in final_te.items()},
-                    'n_test_abnormal': int(yte.sum()),
-                    'n_test_normal': int((yte == 0).sum())}
-                emit('')
-                emit('  全組合列舉（每組取 %s 參數%s）：'
-                     % ('一個' if mpg <= 1 else '1~%d 個' % mpg,
-                        '，同樣套用增益停止' if enum_trunc else '，不截斷'))
-                emit(fmt_table(rt.drop(columns=['規則']).head(5),
-                               left_cols=('組合', '條件數')))
-                emit('  「條件數」為該規則實際採納的條件數%s'
-                     % ('，截斷後重複的規則已合併。' if enum_trunc else '。'))
-                gap = float((rt['訓練F1'] - rt['驗證F1']).mean())
-                emit('  訓練與驗證 F1 平均落差：%.3f' % gap)
-                if gap > 0.15:
-                    emit('  ⚠️ 落差偏大，門檻對訓練集過擬合，以驗證集為準。')
+                # enum_truncate=False 時，方案 B 評估完整長度的組合（不早停），
+                # 使其真正補足方案 A —— 兩者都截斷時結果會大量重複。
+                enum_trunc = rc.get('enum_truncate', True)
+                # max_per_group > 1 時，每組可取 1~m 個參數，使同組配對納入
+                # 正規枚舉。一組一個原是為避免冗餘（同組參數彼此相關），
+                # 但真根因有時集中在同一組，該情形下一組一個的空間有缺口。
+                mpg = max(1, int(rc.get('max_per_group', 1)))
+                opts = []
+                for g in groups_named:
+                    gm_ = [nm for nm in g if nm in stump]
+                    sub = []
+                    for r in range(1, min(mpg, len(gm_)) + 1):
+                        sub.extend(itertools.combinations(gm_, r))
+                    opts.append(sub or [()])
+                n_combo = int(np.prod([len(o) for o in opts]))
+                if mpg > 1:
+                    emit('  每組可取 1~%d 個參數，組合數 %d' % (mpg, n_combo))
+                    if n_combo > rc['max_combo']:
+                        emit('  ⚠️ 超過 max_combo %d，退回每組一個。'
+                             % rc['max_combo'])
+                        opts = [[(nm,) for nm in g if nm in stump] or [()]
+                                for g in groups_named]
+                rows = enumerate_rules(
+                    opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
+                    enum_trunc, prune=rc.get('enum_prune', True),
+                    max_rows=int(rc.get('enum_max_rows', 20000)), emit=emit,
+                    stats=_ENUM)
+                _ENUM['combos'] = n_combo
+                if rows:
+                    rt = pd.DataFrame(rows).sort_values('驗證F1', ascending=False)
+                    rt.to_csv('%s_rules.csv' % prefix, index=False,
+                              encoding='utf-8-sig')
+                    emit('')
+                    # --- 最終採用：以訓練集指標決定，驗證集僅用於報告 ---
+                    # 兩種搜尋的空間互不包含：列舉窮舉「一組一個」的所有組合，
+                    # 序貫在同一空間走貪心路徑但另可走同組配對。故各有盲點，
+                    # 任一方都可能較好。
+                    # 以訓練集決定採用者 —— 若改看驗證集挑，等於對驗證集過擬合，
+                    # 其數字將不再是無偏的效能估計。
+                    enum_best = rt.iloc[0]
+                    emit('')
+                    emit('  最終採用（依訓練集 %s 決定）：' % gm)
+                    emit('    序貫      訓練 %.3f ／ 驗證 %.3f'
+                         % (seq_tr[gm], seq_te[gm]))
+                    emit('    全組合最佳 訓練 %.3f ／ 驗證 %.3f'
+                         % (enum_best['訓練F1'], enum_best['驗證F1']))
+                    if enum_best['訓練F1'] > seq_tr[gm]:
+                        final_rule = enum_best['規則']
+                        final_te = {'F1': enum_best['驗證F1'],
+                                    '解釋數': enum_best['驗證解釋數'],
+                                    '未解釋數': enum_best['驗證未解釋數'],
+                                    '解釋比例': enum_best['驗證解釋比例'],
+                                    '誤報數': enum_best['驗證誤報數'],
+                                    '誤報率': enum_best['驗證誤報率']}
+                        emit('    → 採用全組合最佳')
+                    else:
+                        final_rule = ' 且 '.join('%s %s %.4g' % c
+                                                 for c in seq_conds)
+                        final_te = seq_te
+                        emit('    → 採用序貫')
+                    emit('    規則：當 %s 時判定為異常' % final_rule)
+                    emit('    驗證集：解釋 %d／未解釋 %d（%.1f%%），'
+                         '誤報 %d（%.1f%%），F1 %.3f'
+                         % (final_te['解釋數'], final_te['未解釋數'],
+                            100 * final_te['解釋比例'], final_te['誤報數'],
+                            100 * final_te['誤報率'], final_te['F1']))
 
-                best = rt.iloc[0]
-                emit('')
-                emit('  最佳規則：當 %s 時判定為異常' % best['規則'])
-                emit('  驗證集：解釋 %d／未解釋 %d（%.1f%%），誤報 %d（%.1f%%）'
-                     % (best['驗證解釋數'], best['驗證未解釋數'],
-                        100 * best['驗證解釋比例'], best['驗證誤報數'],
-                        100 * best['驗證誤報率']))
+                    RESULT['rule'] = {
+                        'path': path,
+                        'seq_rule': ' 且 '.join('%s %s %.4g' % c
+                                               for c in seq_conds),
+                        'enum_top': rt.drop(columns=['規則']).head(5)
+                                      .to_dict(orient='records'),
+                        'enum_truncate': bool(enum_trunc),
+                        'max_per_group': mpg,
+                        'enum_rule': str(enum_best['規則']),
+                        'final_rule': final_rule,
+                        'final_source': ('全組合' if enum_best['訓練F1'] >
+                                         seq_tr[gm] else '序貫'),
+                        'metric': gm,
+                        'seq': {'train': seq_tr[gm], 'test': seq_te[gm]},
+                        'enum': {'train': float(enum_best['訓練F1']),
+                                 'test': float(enum_best['驗證F1'])},
+                        'test': {k: (float(v) if isinstance(v, (int, float))
+                                     else v)
+                                 for k, v in final_te.items()},
+                        'n_test_abnormal': int(yte.sum()),
+                        'n_test_normal': int((yte == 0).sum())}
+                    emit('')
+                    emit('  全組合列舉（每組取 %s 參數%s）：'
+                         % ('一個' if mpg <= 1 else '1~%d 個' % mpg,
+                            '，同樣套用增益停止' if enum_trunc else '，不截斷'))
+                    emit(fmt_table(rt.drop(columns=['規則']).head(5),
+                                   left_cols=('組合', '條件數')))
+                    emit('  「條件數」為該規則實際採納的條件數%s'
+                         % ('，截斷後重複的規則已合併。' if enum_trunc else '。'))
+                    gap = float((rt['訓練F1'] - rt['驗證F1']).mean())
+                    emit('  訓練與驗證 F1 平均落差：%.3f' % gap)
+                    if gap > 0.15:
+                        emit('  ⚠️ 落差偏大，門檻對訓練集過擬合，以驗證集為準。')
 
-                # 隨機對照
-                if rc['n_random'] > 0:
-                    r3 = np.random.RandomState(cfg['seed'] + 1)
-                    br = []
-                    for _ in range(rc['n_random']):
-                        pick = r3.choice(len(names), size=len(groups_named),
-                                         replace=False)
-                        cds = []
-                        for p in pick:
-                            b = best_stump(Xtr[:, p], ytr, rc['n_quantile'])
-                            if b:
-                                cds.append((names[p], b[0], b[1]))
-                        if len(cds) == len(groups_named):
-                            br.append(eval_rule(apply_rule(Xte, names, cds),
-                                                yte)['F1'])
-                    if br:
-                        br = np.array(br)
-                        pv = float((br >= final_te['F1']).mean())
-                        emit('  隨機對照（挑 %d 個參數，%d 次）：'
-                             '平均 F1 %.3f，95%%分位 %.3f'
-                             % (len(groups_named), len(br), br.mean(),
-                                np.percentile(br, 95)))
-                        emit('  最終規則 F1 %.3f，p = %.3f'
-                             % (final_te['F1'], pv))
-                        emit('  %s' % ('✅ 顯著優於隨機挑參數。' if pv < 0.05
-                                       else '❌ 未顯著優於隨機，說服力有限。'))
-                        RESULT.setdefault('rule', {})['random'] = {
-                            'mean': float(br.mean()),
-                            'p95': float(np.percentile(br, 95)),
-                            'p': pv}
+                    best = rt.iloc[0]
+                    emit('')
+                    emit('  最佳規則：當 %s 時判定為異常' % best['規則'])
+                    emit('  驗證集：解釋 %d／未解釋 %d（%.1f%%），誤報 %d（%.1f%%）'
+                         % (best['驗證解釋數'], best['驗證未解釋數'],
+                            100 * best['驗證解釋比例'], best['驗證誤報數'],
+                            100 * best['驗證誤報率']))
+
+                    # 隨機對照
+                    if rc['n_random'] > 0:
+                        r3 = np.random.RandomState(cfg['seed'] + 1)
+                        br = []
+                        for _ in range(rc['n_random']):
+                            pick = r3.choice(len(names), size=len(groups_named),
+                                             replace=False)
+                            cds = []
+                            for p in pick:
+                                b = best_stump(Xtr[:, p], ytr, rc['n_quantile'])
+                                if b:
+                                    cds.append((names[p], b[0], b[1]))
+                            if len(cds) == len(groups_named):
+                                br.append(eval_rule(apply_rule(Xte, names, cds),
+                                                    yte)['F1'])
+                        if br:
+                            br = np.array(br)
+                            pv = float((br >= final_te['F1']).mean())
+                            emit('  隨機對照（挑 %d 個參數，%d 次）：'
+                                 '平均 F1 %.3f，95%%分位 %.3f'
+                                 % (len(groups_named), len(br), br.mean(),
+                                    np.percentile(br, 95)))
+                            emit('  最終規則 F1 %.3f，p = %.3f'
+                                 % (final_te['F1'], pv))
+                            emit('  %s' % ('✅ 顯著優於隨機挑參數。' if pv < 0.05
+                                           else '❌ 未顯著優於隨機，說服力有限。'))
+                            RESULT.setdefault('rule', {})['random'] = {
+                                'mean': float(br.mean()),
+                                'p95': float(np.percentile(br, 95)),
+                                'p': pv}
     else:
         emit('\n[步驟 7] 規則萃取已關閉。')
 
