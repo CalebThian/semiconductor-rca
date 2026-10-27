@@ -76,6 +76,13 @@ class PerTargetMLP(nn.Module):
             )
             self.groups.append(f"group_{j}")
 
+        # Feature -> variable map as a single tensor, for the vectorized
+        # importance computation below. The per-variable `group_*` buffers are
+        # kept so that any external code indexing them still works.
+        self.register_buffer(
+            "gid", torch.tensor(feature_to_variable, dtype=torch.long)
+        )
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Predict the target value(s).
 
@@ -105,22 +112,31 @@ class PerTargetMLP(nn.Module):
 
         Returns:
             Tensor of shape (n_variables,) with non-negative importance scores.
+
+        Vectorized: a Frobenius norm is the square root of the sum of squared
+        entries, so "slice W1's columns per variable, then take a fro norm" is
+        exactly one index_add over the squared column sums. Equivalent to the
+        per-variable Python loop in both value and gradient (verified to
+        machine precision in float64 for task1/2a/2b groupings, including
+        empty groups).
+
+        The loop version cost N Python iterations (getattr + advanced indexing
+        + norm) on *every* optimizer step, since group_lasso_loss() calls this.
+        At N=300 with 3N predictors that dominated training time (~18x).
+
+        The double `where` is required, not cosmetic: when a variable's whole
+        weight block is exactly zero, sqrt has an infinite gradient at 0 while
+        torch.linalg.norm returns a finite 0. A single `where` cannot fix it
+        because 0 * NaN is still NaN, so the non-selected branch must never
+        see a zero input.
         """
-        # W1 shape: (hidden_dim, input_dim)
-        W1 = self.fc1.weight
-        importance = torch.zeros(self.n_variables, device=W1.device)
-
-        for j in range(self.n_variables):
-            group_idx = getattr(self, f"group_{j}")
-            if group_idx.numel() == 0:
-                # No features belong to this variable (e.g., self in Task 2A)
-                continue
-            # Select columns corresponding to variable j
-            W_j = W1[:, group_idx]  # shape (hidden_dim, n_features_for_j)
-            # L2 norm across all entries (matrix Frobenius norm)
-            importance[j] = torch.linalg.norm(W_j, ord="fro")
-
-        return importance
+        W1 = self.fc1.weight                        # (hidden_dim, input_dim)
+        sq = W1.pow(2).sum(dim=0)                   # (input_dim,)
+        acc = torch.zeros(self.n_variables, device=W1.device, dtype=sq.dtype)
+        acc = acc.index_add(0, self.gid, sq)        # sum of squares per var
+        pos = acc > 0
+        safe = torch.where(pos, acc, torch.ones_like(acc))
+        return torch.where(pos, safe.sqrt(), torch.zeros_like(acc))
 
     def group_lasso_loss(self) -> torch.Tensor:
         """Compute group-lasso penalty on first-layer weights.

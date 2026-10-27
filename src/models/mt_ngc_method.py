@@ -36,10 +36,29 @@ class MTNeuralGrangerMethod(CausalDiscoveryMethod):
         patience: int = 20,
         output_graph: str = "consensus",
         verbose: bool = False,
+        tasks: tuple | None = None,
     ):
         assert output_graph in {"task1", "task2a", "task2b", "consensus"}, (
             f"Invalid output_graph: {output_graph}"
         )
+        # Restricting `tasks` skips training the graphs you never read.
+        # consensus is the geometric mean of all three, so it cannot be
+        # produced from a subset — fail here rather than silently returning
+        # a consensus built from randomly initialized predictors.
+        if tasks is not None:
+            tasks = tuple(tasks)
+            if output_graph == "consensus" and set(tasks) != {
+                "task1", "task2a", "task2b"
+            }:
+                raise ValueError(
+                    "output_graph='consensus' needs all three tasks, but "
+                    f"tasks={tasks}. Either train all three or pick a single "
+                    "task as output_graph."
+                )
+            if output_graph not in tasks:
+                raise ValueError(
+                    f"output_graph={output_graph!r} is not in tasks={tasks}."
+                )
         self.output_graph = output_graph
         self.config = TrainConfig(
             lookback=lookback,
@@ -53,6 +72,7 @@ class MTNeuralGrangerMethod(CausalDiscoveryMethod):
             max_epochs=max_epochs,
             patience=patience,
             verbose=verbose,
+            tasks=tasks,
         )
 
     def fit(self, data: np.ndarray, **kwargs) -> CausalDiscoveryResult:

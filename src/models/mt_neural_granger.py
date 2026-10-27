@@ -23,7 +23,10 @@ from src.datasets.task_dataloaders import (
     get_input_dim,
 )
 from src.models.per_target_mlp import PerTargetMLP
-from src.models.hybrid_per_target_mlp import HybridPerTargetMLP
+
+# HybridPerTargetMLP is imported lazily inside __init__ so that this package
+# works without it when use_hybrid is False (the default, and the only mode
+# the semiconductor pipeline uses).
 
 
 TASKS = ["task1", "task2a", "task2b"]
@@ -46,6 +49,7 @@ class MultiTaskNeuralGranger(nn.Module):
         use_hybrid: bool = False,
         gate_init: float = 0.0,
         ridge_lambda: float = 1e-3,
+        tasks: list[str] | tuple[str, ...] | None = None,
     ):
         super().__init__()
         self.N = n_variables
@@ -55,11 +59,24 @@ class MultiTaskNeuralGranger(nn.Module):
         self.gate_init = gate_init
         self.ridge_lambda = ridge_lambda
 
-        # Build 3N predictors, organized as ModuleDict per task.
+        # Which tasks to instantiate. Default = all three (unchanged
+        # behaviour). Restricting this skips both the allocation and the
+        # training of predictors whose graph is never used: at N=300 the
+        # three tasks hold ~46M parameters in total, and a pipeline that only
+        # reads task2b was paying for all of it.
+        self.tasks = list(tasks) if tasks else list(TASKS)
+        bad = [t for t in self.tasks if t not in TASKS]
+        if bad:
+            raise ValueError(f"Unknown task(s): {bad}; valid: {TASKS}")
+
+        if use_hybrid:
+            from src.models.hybrid_per_target_mlp import HybridPerTargetMLP
+
+        # Build the predictors, organized as ModuleDict per task.
         # predictors[task][i] = PerTargetMLP for target i under that task.
         self.predictors = nn.ModuleDict()
-                        
-        for task in TASKS:
+
+        for task in self.tasks:
             task_modules = nn.ModuleList()
             input_dim = get_input_dim(task, n_variables, lookback)
 
@@ -128,6 +145,13 @@ class MultiTaskNeuralGranger(nn.Module):
         A[i, j] = importance of source variable j when predicting target i.
         Diagonal is zeroed (no self-loops in output).
         """
+        if task not in self.predictors:
+            raise ValueError(
+                f"task {task!r} was not instantiated (this model holds "
+                f"{self.tasks}). Asking for its graph would return the "
+                f"random initialization, which looks like a normal graph but "
+                f"carries no information."
+            )
         A = np.zeros((self.N, self.N), dtype=np.float32)
         for i in range(self.N):
             mlp = self.predictors[task][i]
@@ -137,8 +161,14 @@ class MultiTaskNeuralGranger(nn.Module):
         return A
 
     def get_all_graphs(self) -> dict[str, np.ndarray]:
-        """Return all 3 task graphs + geometric-mean consensus."""
-        graphs = {task: self.get_graph(task) for task in TASKS}
+        """Return the instantiated task graphs, plus consensus if complete.
+
+        Consensus is the geometric mean of all three tasks, so it is only
+        produced when all three were built and trained.
+        """
+        graphs = {task: self.get_graph(task) for task in self.tasks}
+        if set(self.tasks) != set(TASKS):
+            return graphs
 
         # Geometric mean consensus.
         # Normalize each graph to [0, 1] first so the geometric mean is

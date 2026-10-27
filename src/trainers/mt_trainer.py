@@ -35,6 +35,10 @@ class TrainConfig:
     val_frac: float = 0.2
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
     verbose: bool = True
+    # Which task graphs to train. None = all three (unchanged behaviour).
+    # A pipeline that only reads task2b can pass ("task2b",) and skip 2/3 of
+    # the work; consensus then becomes unavailable, by design.
+    tasks: tuple | None = None
 
 
 @dataclass
@@ -121,7 +125,13 @@ def _train_one_predictor(
         # --- early stopping ---
         if avg_val < best_val - 1e-5:
             best_val = avg_val
-            best_state = {k: v.detach().clone() for k, v in mlp.state_dict().items()}
+            # state_dict() includes buffers, and PerTargetMLP registers one
+            # per source variable (group_0 … group_{N-1}, plus gid). Those
+            # never change during training, yet the old code copied all N+1
+            # of them on every validation improvement. Only parameters need
+            # saving.
+            best_state = {k: v.detach().clone()
+                          for k, v in mlp.named_parameters()}
             patience_counter = 0
         else:
             patience_counter += 1
@@ -129,7 +139,8 @@ def _train_one_predictor(
                 break
 
     if best_state is not None:
-        mlp.load_state_dict(best_state)
+        # strict=False because best_state now holds parameters only.
+        mlp.load_state_dict(best_state, strict=False)
 
     return avg_train, best_val, epochs_run
 
@@ -168,10 +179,11 @@ def train_mt_neural_granger(
         use_hybrid=config.use_hybrid,
         gate_init=config.gate_init,
         ridge_lambda=config.ridge_lambda,
+        tasks=config.tasks,
     )
     log = TrainLog()
 
-    for task in TASKS:
+    for task in model.tasks:
         if config.verbose:
             print(f"\n{'='*55}\nTraining {task}\n{'='*55}")
         t0 = time.time()
