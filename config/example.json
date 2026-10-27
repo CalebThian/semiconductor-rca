@@ -1,0 +1,55 @@
+{
+  "data": {
+    "csv": "data/raw/semiconductor/case1.csv",
+    "wafer_col": "LOT_ID,WAFER_ID",
+    "label_col": "Symbol Define",
+    "abnormal_value": "Abnormal",
+    "exclude": [],
+    "dropna": "row",
+    "drop_col_na_frac": 0.5
+  },
+  "candidates": {
+    "file": "",
+    "topk": 5,
+    "min_effect": 0.5,
+    "n_boot": 200,
+    "true_roots": [],
+    "sensor_col": "sensor",
+    "priority_col": "priority",
+    "n_perm": 300,
+    "add_statistical": true,
+    "expansion": {
+      "enabled": true,
+      "max_hop": 2,
+      "min_effect": null
+    }
+  },
+  "graph": {
+    "path": "results/case1_real_graph_task2b.npy",
+    "edge_k": 2,
+    "min_concentration": 0.0,
+    "max_hop": 3
+  },
+  "rules": {
+    "enabled": true,
+    "test_frac": 0.4,
+    "n_quantile": 39,
+    "n_random": 200,
+    "max_combo": 2000,
+    "min_gain": 0.02,
+    "gain_metric": "F1",
+    "enum_truncate": true,
+    "enum_prune": true,
+    "enum_max_rows": 20000,
+    "max_per_group": 1,
+    "extend": false,
+    "extend_when": 1,
+    "extend_max_add": 2
+  },
+  "output": {
+    "prefix": "results/case1_pipeline",
+    "show_welch": true,
+    "brief": false
+  },
+  "seed": 0
+}

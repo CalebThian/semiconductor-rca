@@ -208,10 +208,16 @@ def main():
     # ---- 5 疑似憑證 ----
     hr('[5] 疑似憑證（粗篩，被追蹤的文字檔）')
     hits = []
+    me = os.path.realpath(__file__)
+    skipped_self = False
     for f in files:
         if not lower_ends(f, TEXT_EXT):
             continue
         p = os.path.join(repo, f)
+        # 這支程式自己就含那些樣式字串，會命中自己。略過，並說明。
+        if os.path.exists(p) and os.path.realpath(p) == me:
+            skipped_self = True
+            continue
         if not os.path.exists(p) or os.path.getsize(p) > 2 * 1024 ** 2:
             continue
         try:
@@ -223,7 +229,8 @@ def main():
                             break
         except (IOError, OSError):
             continue
-    say('  命中 %d 處' % len(hits))
+    say('  命中 %d 處%s' % (len(hits),
+                            '（已略過本程式自身）' if skipped_self else ''))
     for f, n, k in hits[:args.top]:
         say('    %s:%d  含「%s」' % (f, n, k))
     if hits:

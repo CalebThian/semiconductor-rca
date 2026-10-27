@@ -1,9 +1,9 @@
-# 資料與結果：一律不進版本控制
-data/
-datasets/
-results/
-experiments/
-experiment_results/
+# 資料與結果：只排除 repo 根目錄下的，不要吃掉 src/ 底下的同名套件
+/data/
+/datasets/
+/results/
+/experiments/
+/experiment_results/
 *.csv
 *.tsv
 *.xlsx
