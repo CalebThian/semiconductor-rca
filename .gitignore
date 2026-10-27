@@ -1,0 +1,26 @@
+# 資料與結果：一律不進版本控制
+data/
+datasets/
+results/
+experiments/
+experiment_results/
+*.csv
+*.tsv
+*.xlsx
+*.npy
+*.npz
+*.pkl
+*.pt
+*.pth
+*.html
+
+# Jupyter 的過期副本
+.ipynb_checkpoints/
+__pycache__/
+*.pyc
+
+# 環境
+.venv/
+venv/
+env/
+.env
