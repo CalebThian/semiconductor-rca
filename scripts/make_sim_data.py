@@ -379,7 +379,7 @@ def main():
         'data': {
             'csv': out,
             'train_csv': '',
-            'wafer_col': 'LOT_ID,WFR_ID',
+            'wafer_col': 'LOT_ID,WFR_ID,START_DATETIME',
             'label_col': 'Symbol Define',
             'abnormal_value': 'Abnormal',
             'exclude': [],

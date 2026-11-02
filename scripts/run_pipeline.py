@@ -83,7 +83,7 @@ DEFAULT_META = ['WFR_ID', 'WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME'
 TEMPLATE = {
     "data": {
         "csv": "data/raw/semiconductor/case1.csv",
-        "wafer_col": "LOT_ID,WAFER_ID",
+        "wafer_col": "LOT_ID,WFR_ID,START_DATETIME",
         "label_col": "Symbol Define",
         "abnormal_value": "Abnormal",
         "exclude": [],
@@ -754,16 +754,46 @@ def main():
         wkey = key_cols[0]
     else:
         wkey = '__WKEY__'
-        raw[wkey] = raw[key_cols].astype(str).agg('_'.join, axis=1)
+        # concat 而非 raw[wkey] = ...：欄數多時逐欄 insert 會讓 DataFrame
+        # 碎片化，pandas 會為此發出 PerformanceWarning
+        raw = pd.concat(
+            [raw, raw[key_cols].astype(str).agg('_'.join, axis=1)
+             .rename(wkey)], axis=1)
     n_uni = raw[wkey].nunique()
-    emit('  wafer 鍵：%s → %d 個唯一值' % (' + '.join(key_cols), n_uni))
+    emit('  wafer 鍵：%s → %d 個唯一值（共 %d 列）'
+         % (' + '.join(key_cols), n_uni, len(raw)))
 
     mixed = int((raw.groupby(wkey)[dc['label_col']].nunique() > 1).sum())
     if mixed:
         sys.exit('❌ 有 %d 個 wafer 分組含多種標籤，wafer 鍵不唯一。\n'
                  '   請於 config 的 data.wafer_col 改用複合鍵，'
-                 '例如 "LOT_ID,WAFER_ID"' % mixed)
+                 '例如 "LOT_ID,WFR_ID,START_DATETIME"' % mixed)
     emit('  標籤一致性：通過')
+
+    # 鍵太唯一和鍵不唯一一樣危險，但不會被上面的標籤檢查攔到：
+    # 每個分組只有一列時每組都只有一個標籤，檢查照樣通過。
+    # 一列一片的資料（本專案的 FD 資料）本來就該如此；
+    # 但一片多列的原始資料若把 START_DATETIME 放進鍵裡，
+    # 每個時間點會變成一片獨立的「wafer」，聚合就失去意義。
+    rows_per = raw.groupby(wkey).size()
+    if n_uni == len(raw):
+        emit('  每個鍵只對應 1 列 → 聚合為恆等運算（一列一片的資料即如此）')
+        dtlike = [c for c in key_cols
+                  if 'TIME' in c.upper() or 'DATE' in c.upper()]
+        if dtlike and len(key_cols) > 1:
+            without = raw[[c for c in key_cols if c not in dtlike]] \
+                .astype(str).agg('_'.join, axis=1).nunique()
+            if without < n_uni:
+                emit('    註：移除 %s 後只剩 %d 個唯一值。'
+                     % ('、'.join(dtlike), without))
+                emit('    若這份資料本來是一片多列（原始 FD 軌跡），'
+                     '請把時間欄從 wafer_col 移除，')
+                emit('    否則每個時間點會被當成一片獨立的 wafer。'
+                     '若是一列一片則無需處理。')
+    else:
+        emit('  每個鍵對應的列數：最少 %d／中位 %d／最多 %d'
+             % (int(rows_per.min()), int(rows_per.median()),
+                int(rows_per.max())))
 
     exclude = set(DEFAULT_META) | set(key_cols) | {wkey, dc['label_col']}
     exclude |= set(dc.get('exclude', []))

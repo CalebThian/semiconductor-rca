@@ -49,7 +49,7 @@ TEMPLATE = {
     "data": {
         "csv": "data/raw/semiconductor/case1.csv",
         "train_csv": "",
-        "wafer_col": "LOT_ID,WAFER_ID",
+        "wafer_col": "LOT_ID,WFR_ID,START_DATETIME",
         "label_col": "Symbol Define",
         "abnormal_value": "Abnormal",
         "exclude": [],
