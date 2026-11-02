@@ -135,6 +135,11 @@ def parse_args():
                    help='候選參數清單（txt 一行一個，或 csv）；無條件保留')
     p.add_argument('--cand-col', default=None,
                    help='candidates 為 csv 時，參數名稱所在的欄名')
+    p.add_argument('--max-na-frac', type=float, default=1.0,
+                   help='缺值比例超過此值的參數排除在排序之外。'
+                        '應與分析階段的 data.drop_col_na_frac 一致，'
+                        '否則選出的參數會在分析階段被丟掉，'
+                        '圖與分析的節點就對不上（1.0 = 不限制）')
     p.add_argument('--near-const-frac', type=float, default=1e-8,
                    help='變異數小於「全體最大變異數 × 此值」視為近常數')
     p.add_argument('--dup-corr', type=float, default=0.999,
@@ -278,6 +283,30 @@ def main():
                                   ' ...' if len(missc) > 10 else ''))
         cand = hit
 
+    # ---- 0 高缺值欄 ----
+    # 必須和分析階段用同一個門檻。否則這裡選出的參數會在分析階段被
+    # drop_col_na_frac 丟掉，而圖是在這裡選出的參數上訓練的 ——
+    # 兩邊的節點集合就對不上。
+    if args.max_na_frac < 1.0:
+        emit('')
+        emit('[0] 高缺值欄（門檻 %.0f%%，與分析階段一致）'
+             % (100.0 * args.max_na_frac))
+        nf = raw[cols].isna().mean()
+        drop_na = [c for c in cols
+                   if nf[c] > args.max_na_frac and c not in set(cand)]
+        keep_cand = [c for c in cand if nf[c] > args.max_na_frac]
+        emit('    排除 %d 個' % len(drop_na))
+        if keep_cand:
+            emit('    %d 個候選超過門檻但予以保留：%s'
+                 % (len(keep_cand), ', '.join(map(str, keep_cand[:6]))))
+            emit('    ⚠️ 這些候選在分析階段會被丟掉，圖裡的它們會變成'
+                 '孤立節點。')
+        cols = [c for c in cols if c not in set(drop_na)]
+        if not cols:
+            sys.exit('所有參數的缺值都超過 %.0f%%，無可用欄位。'
+                     % (100.0 * args.max_na_frac))
+        emit('    剩餘 %d 個' % len(cols))
+
     # ---- 1 常數欄 ----
     emit('')
     emit('[1] 常數欄（變異數為 0）')
@@ -378,10 +407,20 @@ def main():
             b = raw.loc[~is_ab, cols]
             ma, mb = a.mean(), b.mean()
             va, vb = a.var(ddof=1), b.var(ddof=1)
-            se = np.sqrt(va / max(len(a), 1) + vb / max(len(b), 1))
+            # 分母要用「該欄的非缺值個數」，不是列數。用列數會低估 se、
+            # 高估 |t|，使缺值多的欄被系統性地排到前面 —— 實測 150 個
+            # 選出的參數有 135 個是高缺值欄，之後又被分析階段的
+            # drop_col_na_frac 丟掉，圖與分析只剩 15 個節點對得上。
+            na, nb = a.count(), b.count()
+            se = np.sqrt(va / na.clip(lower=1) + vb / nb.clip(lower=1))
             se = se.replace(0, np.nan)
-            score = (ma - mb).abs() / se
-            score = score.fillna(0.0)
+            score = ((ma - mb).abs() / se).fillna(0.0)
+            # 有效樣本太少的欄位，t 值不可信，直接排除在排序之外
+            too_few = (na < 5) | (nb < 5)
+            if too_few.any():
+                emit('    %d 個參數的有效樣本不足 5（任一類），'
+                     '已排除在排序之外' % int(too_few.sum()))
+                score[too_few] = 0.0
             emit('    ⚠️ 此模式用到標籤。之後不可主張「圖未看過標籤」。')
         else:
             score = normal[cols].var(axis=0, ddof=0)

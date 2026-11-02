@@ -99,18 +99,49 @@ def random_dag(n, density, rng):
     return B, order
 
 
-def random_lagged(n, density, rng, max_radius=0.9):
-    """滯後效應：稀疏矩陣，縮放到譜半徑 < max_radius 以保證穩定。"""
+def random_lagged(n, density, rng):
+    """滯後效應：稀疏矩陣。縮放交給 stabilize()，見那裡的說明。"""
     A = np.zeros((n, n))
     mask = rng.random((n, n)) < density
     A[mask] = rng.uniform(0.2, 0.6, mask.sum()) * rng.choice(
         [-1.0, 1.0], mask.sum())
     # 自回歸項：讓每個參數有一定的時間連續性（真實感測器都有）
     np.fill_diagonal(A, rng.uniform(0.3, 0.6, n))
-    r = np.max(np.abs(np.linalg.eigvals(A)))
-    if r > max_radius:
-        A *= max_radius / r
     return A
+
+
+def spectral_radius(matvec, n, iters=60, seed=0):
+    """用幂迭代估譜半徑。n 到幾千時完整特徵值分解太慢（O(n^3)）。"""
+    rng = np.random.default_rng(seed)
+    v = rng.normal(size=n)
+    nv = np.linalg.norm(v)
+    if nv == 0:
+        return 0.0
+    v /= nv
+    r = 0.0
+    for _ in range(iters):
+        w = matvec(v)
+        r = float(np.linalg.norm(w))
+        if not np.isfinite(r) or r == 0:
+            return r
+        v = w / r
+    return r
+
+
+def stabilize(A1, I_B_inv, max_radius=0.9):
+    """把 A1 縮放到使整個系統穩定，回傳 (A1, 縮放前的 rho)。
+
+    遞迴是 x_t = (I-B)^-1 (A1 x_{t-1} + e_t)，所以有效的轉移矩陣是
+    M = (I-B)^-1 A1，穩定條件是 rho(M) < 1 —— 不是 rho(A1) < 1。
+    (I-B)^-1 會放大，先前只縮放 A1 導致 rho(M) 遠大於 1，模擬值指數
+    成長到 1e68（看起來是有限值，但變異數 1e133 會讓所有以變異數為
+    基準的篩選失效）。
+    """
+    n = A1.shape[0]
+    rho = spectral_radius(lambda v: I_B_inv @ (A1 @ v), n)
+    if np.isfinite(rho) and rho > max_radius:
+        A1 = A1 * (max_radius / rho)
+    return A1, rho
 
 
 def main():
@@ -126,10 +157,14 @@ def main():
                    help='根因在異常 wafer 的位移（標準差倍數）')
     p.add_argument('--propagation', type=float, default=1.0,
                    help='傳播強度倍率。0 = 只有根因偏移（題目最簡單）')
-    p.add_argument('--inst-density', type=float, default=0.004,
-                   help='同期 DAG 的邊密度')
-    p.add_argument('--lag-density', type=float, default=0.003,
-                   help='滯後矩陣的邊密度')
+    p.add_argument('--inst-degree', type=float, default=1.5,
+                   help='同期 DAG 的平均入度（每個節點平均幾個父節點）。'
+                        '用出度而非密度，是因為密度固定時出度會隨 N 成長：'
+                        'N=231 時密度 0.004 對應出度 0.9（穩定），'
+                        'N=3850 時卻是 7.7，路徑乘積以 (出度×權重)^深度 '
+                        '爆炸，實測數值衝到 1e307')
+    p.add_argument('--lag-degree', type=float, default=1.0,
+                   help='滯後矩陣的平均入度（不含自回歸項）')
     p.add_argument('--const-frac', type=float, default=0.10,
                    help='常數欄比例')
     p.add_argument('--near-const-frac', type=float, default=0.05)
@@ -168,11 +203,29 @@ def main():
     # ---- 結構 ----
     print('')
     print('[1] 產生因果結構')
-    B, order = random_dag(n_sig, args.inst_density, rng)
-    A1 = random_lagged(n_sig, args.lag_density, rng)
+    # 密度 = 目標入度 / 可用配對數，使結構的穩定性與 N 無關。
+    # DAG 只接受拓樸序在前的節點當父節點，平均只有 N/2 個候選，
+    # 所以要乘 2 才能達到要求的入度；滯後矩陣沒有這個限制。
+    B, order = random_dag(n_sig, 2.0 * args.inst_degree / max(n_sig, 1), rng)
+    A1 = random_lagged(n_sig, args.lag_degree / max(n_sig, 1), rng)
     I_B_inv = np.linalg.inv(np.eye(n_sig) - B)
-    print('    同期邊 %d，滯後邊 %d（含自回歸 %d）'
-          % (int((B != 0).sum()), int((A1 != 0).sum()), n_sig))
+    A1, rho0 = stabilize(A1, I_B_inv)
+    print('    同期邊 %d（平均出度 %.2f），滯後邊 %d（含自回歸 %d）'
+          % (int((B != 0).sum()), (B != 0).sum() / max(n_sig, 1),
+             int((A1 != 0).sum()), n_sig))
+    # (I-B)^-1 的放大倍率。B 在拓樸序下嚴格下三角故為幂零，級數有限，
+    # 但路徑數會隨出度組合爆炸 —— 這裡先量出來再決定要不要繼續。
+    amp = float(np.abs(I_B_inv).max())
+    rho1 = spectral_radius(lambda v: I_B_inv @ (A1 @ v), n_sig)
+    print('    (I-B)^-1 的最大放大倍率：%.3g' % amp)
+    print('    有效轉移矩陣 (I-B)^-1·A1 的譜半徑：%.3f → %.3f（已縮放）'
+          % (rho0, rho1))
+    if not np.isfinite(amp) or amp > 1e6 or not np.isfinite(rho1) \
+            or rho1 > 0.99:
+        sys.exit('結構不穩定（放大倍率 %.3g，譜半徑 %.3g），模擬值會爆炸。'
+                 '\n請調低 --inst-degree（目前 %.2f）或 --lag-degree'
+                 '（目前 %.2f）。'
+                 % (amp, rho1, args.inst_degree, args.lag_degree))
 
     # 根因取拓樸序靠前者 —— 上游參數才有東西可傳播
     roots = sorted(order[:args.n_roots].tolist())

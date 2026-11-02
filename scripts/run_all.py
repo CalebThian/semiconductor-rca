@@ -57,6 +57,16 @@ TEMPLATE = {
         "drop_col_na_frac": 0.5
     },
 
+    "reduce": {
+        "enabled": True,
+        "mode": "welch",
+        "max_params": 300,
+        "mem_budget_gb": 2.0,
+        "candidates": "",
+        "out": "data/reduced/{ds}_reduced.csv",
+        "script": "scripts/reduce_params.py"
+    },
+
     "mtngc": {
         "task": "task2b",
         "lookback": 3,
@@ -144,6 +154,19 @@ def subst(s, ds, gc=''):
 ENCODINGS = ['utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1']
 
 
+def read_text_any(path):
+    """依序嘗試常見編碼讀純文字（節點名稱側車檔可能含中文欄名）。"""
+    last = None
+    for enc in ENCODINGS:
+        try:
+            with open(path, 'r', encoding=enc) as f:
+                return f.read()
+        except UnicodeDecodeError as e:
+            last = e
+    raise UnicodeDecodeError('utf-8', b'', 0, 1,
+                             '無法讀取 %s：%s' % (path, last))
+
+
 def read_csv_any(path, **kw):
     """依序嘗試常見編碼讀 csv（台灣環境的 csv 常為 CP950/Big5）。"""
     last = None
@@ -220,7 +243,107 @@ def top_edges(W, k):
     return A
 
 
-def step1_train(cfg):
+def step0_reduce(cfg):
+    """訓練前的參數縮減。回傳要給訓練用的 csv 路徑。
+
+    為什麼在訓練前而不是分析前
+    --------------------------
+      MT-NGC 的參數量約 N² × lookback × hidden，N=5000 時達 48 億個，
+      超過 int32 上限兩倍以上而崩潰。分析階段的 Welch 檢定是 O(N)，
+      5000 個參數毫無壓力 —— 所以只有訓練需要縮減。
+
+      兩邊用不同的參數集之所以可行，是因為圖存了節點名稱側車檔，
+      步驟 3 按名稱對齊，圖裡沒有的參數視為孤立節點。
+
+    為什麼預設用 welch 而不是 variance
+      變異數排序會漏掉真根因 —— 實測一個真根因在 Normal 變異數排
+      2446/5000，Welch 排第 3。好根因的特徵正是「正常時安靜、
+      異常時偏移」，那在變異數上看不出來。
+
+      代價：選欄用到了標籤，所以之後不可主張「圖未看過標籤」。
+      對 B 軌可接受（圖只用於分組已由 Welch 排出的候選）；A 軌若要
+      主張無監督發現，請改 mode = "variance"。
+    """
+    rc = cfg.get('reduce', {}) or {}
+    dc = cfg['data']
+    src = dc.get('train_csv') or dc['csv']
+
+    if not rc.get('enabled', True):
+        return src
+    if dc.get('train_csv'):
+        print('（data.train_csv 已指定，略過參數縮減）')
+        return src
+    if not os.path.exists(src):
+        sys.exit('找不到資料檔：%s' % src)
+
+    banner(0, '參數縮減（訓練用）')
+
+    # 參數數已經夠少時不必多繞一步。只讀表頭，5000 欄的檔案不必全讀。
+    head = read_csv_any(src, nrows=5)
+    meta = {'LOT_ID', 'WFR_ID', 'WAFER_ID', 'START_DATETIME',
+            'END_DATETIME', dc['label_col']}
+    meta |= set(c.strip() for c in dc['wafer_col'].split(',') if c.strip())
+    meta |= set(dc.get('exclude', []))
+    n_param = len([c for c in head.columns if c not in meta])
+
+    mc = cfg['mtngc']
+    lb, hd = int(mc['lookback']), int(mc['hidden_dim'])
+    # 由記憶體預算反推 N：權重 + Adam 的兩份動量 = 3 份 float32
+    budget = float(rc.get('mem_budget_gb', 2.0)) * 1024 ** 3
+    n_mem = int((budget / (12.0 * lb * hd)) ** 0.5)
+    topk = min(int(rc.get('max_params', 300)), n_mem)
+    print('目前參數 %d 個' % n_param)
+    print('記憶體預算 %.1f GB（lookback=%d, hidden=%d）→ 上限 %d 個'
+          % (rc.get('mem_budget_gb', 2.0), lb, hd, n_mem))
+    print('max_params %d → 取兩者較小：%d'
+          % (int(rc.get('max_params', 300)), topk))
+
+    if n_param <= topk:
+        print('參數數已不超過 %d，略過縮減。' % topk)
+        return src
+
+    out = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
+                cfg['train_dataset'])
+    ensure_dir(out)
+    script = rc.get('script', 'scripts/reduce_params.py')
+    if not os.path.exists(script):
+        sys.exit('找不到縮減腳本：%s' % script)
+
+    cmd = [sys.executable, os.path.abspath(script),
+           '--csv', os.path.abspath(src),
+           '--wafer-col', dc['wafer_col'],
+           '--label-col', dc['label_col'],
+           '--abnormal-value', str(dc.get('abnormal_value', 'Abnormal')),
+           '--topk', str(topk),
+           '--mode', rc.get('mode', 'welch'),
+           '--lookback', str(lb), '--hidden', str(hd),
+           # 用分析階段的同一個 NA 門檻 —— 否則這裡選出的參數會在
+           # 步驟 3 被丟掉，而圖是在這些參數上訓練的，節點就對不上
+           '--max-na-frac', str(dc.get('drop_col_na_frac', 0.5)),
+           '--out', os.path.abspath(out)]
+    if dc.get('exclude'):
+        cmd += ['--exclude', ','.join(map(str, dc['exclude']))]
+    cand = rc.get('candidates', '')
+    if cand and os.path.exists(cand):
+        cmd += ['--candidates', os.path.abspath(cand)]
+        print('候選清單：%s（無條件保留）' % cand)
+    else:
+        # 候選集由步驟 2 產生，在此時還不存在。welch 模式下兩者的排序
+        # 依據相同，重疊度高；但仍可能漏掉候選，所以步驟 2 之後會回報
+        # 有多少候選不在圖裡。
+        print('（尚無候選清單；步驟 2 之後會回報候選與圖的覆蓋率）')
+
+    print('執行：%s\n' % ' '.join(cmd))
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        sys.exit('參數縮減回傳錯誤碼 %d。' % r.returncode)
+    if not os.path.exists(out):
+        sys.exit('縮減腳本未產生 %s。' % out)
+    print('\n訓練將使用：%s' % out)
+    return out
+
+
+def step1_train(cfg, train_csv=None):
     ds = cfg['train_dataset']
     mc, ec, dc = cfg['mtngc'], cfg['edges'], cfg['data']
     banner(1, 'MT-NGC 訓練與邊清單輸出')
@@ -240,7 +363,7 @@ def step1_train(cfg):
     # MT-NGC 學的是 Normal 的時序依賴；丟掉含缺值的列會在時間軸上打出
     # 破洞，而 lookback 視窗會跨過破洞、把不相鄰的時點當成相鄰 —— 這正是
     # 當初要傳 segment_lengths 去避免的污染。所以訓練不吃清理後的檔。
-    train_csv = dc.get('train_csv') or dc['csv']
+    train_csv = train_csv or dc.get('train_csv') or dc['csv']
     if not os.path.exists(train_csv):
         sys.exit('找不到訓練用資料檔：%s' % train_csv)
     if train_csv != dc['csv']:
@@ -344,6 +467,14 @@ def step1_train(cfg):
     np.save(gpath, W)
     print('圖已存：%s' % gpath)
 
+    # 節點名稱側車檔。沒有它的話，步驟 3 只能比對矩陣大小 —— 而縮減參數
+    # 或 NA 丟欄都會改變欄位集合，大小相同但順序不同時索引會錯而無人知曉。
+    # 有了它就能按名稱對齊，訓練與分析也不必用同一組參數。
+    npath = os.path.splitext(gpath)[0] + '_nodes.txt'
+    with open(npath, 'w', encoding='utf-8') as f:
+        f.write('\n'.join(map(str, names)) + '\n')
+    print('節點名稱已存：%s（%d 個）' % (npath, len(names)))
+
     # ---- 邊清單 ----
     Wm = np.abs(W).copy()
     np.fill_diagonal(Wm, 0.0)
@@ -388,6 +519,50 @@ def step1_train(cfg):
 # =====================================================================
 # 步驟 2：執行同事的 pipeline
 # =====================================================================
+
+def check_candidate_coverage(cfg, gpath, cand_csv):
+    """回報有多少候選參數不在圖的節點集合裡。
+
+    候選集由步驟 2 產生，而參數縮減在步驟 0 就做了 —— 所以縮減時無法
+    保留候選。不在圖裡的候選會被當成孤立節點，分組對它們沒有作用，
+    而這件事在報告裡看不出來（它們照樣會出現在排查順序中）。
+    所以這裡明確回報，不讓它靜默發生。
+    """
+    npath = os.path.splitext(gpath)[0] + '_nodes.txt'
+    if not (os.path.exists(npath) and os.path.exists(cand_csv)):
+        return
+    try:
+        gnames = set(ln.strip() for ln in
+                     read_text_any(npath).splitlines() if ln.strip())
+        cdf = read_csv_any(cand_csv)
+    except Exception as e:
+        print('（候選覆蓋率檢查略過：%s）' % e)
+        return
+
+    col = cfg.get('analysis', {}).get('sensor_col', 'Sensor')
+    if col not in cdf.columns:
+        objs = [c for c in cdf.columns if cdf[c].dtype == object]
+        if not objs:
+            return
+        col = objs[0]
+    cands = [str(v).strip() for v in cdf[col].dropna()]
+    if not cands:
+        return
+    miss = [c for c in cands if c not in gnames]
+    print('')
+    print('候選與圖的覆蓋率：%d / %d 個候選在圖裡'
+          % (len(cands) - len(miss), len(cands)))
+    if miss:
+        print('  ⚠️ %d 個候選不在圖的節點集合中，將被當成孤立節點：'
+              % len(miss))
+        print('     %s%s' % (', '.join(miss[:10]),
+                             ' …' if len(miss) > 10 else ''))
+        print('  這些參數在步驟 0 的縮減中被丟棄。若它們重要，兩個做法：')
+        print('    1. 把候選檔存起來，下次用 reduce.candidates 指向它'
+              '（無條件保留）')
+        print('    2. 調高 reduce.max_params，或改以 --from-step 2 '
+              '沿用既有的圖')
+
 
 def step2_colleague(cfg):
     ds = cfg['train_dataset']
@@ -568,7 +743,9 @@ def main():
     result_json = subst(cfg['analysis']['prefix'], ds) + '_result.json'
 
     if lo <= 1 <= hi:
-        gpath, _ = step1_train(cfg)
+        # 步驟 0 只在要訓練時才需要 —— 它的輸出只給訓練用
+        train_csv = step0_reduce(cfg)
+        gpath, _ = step1_train(cfg, train_csv)
     elif not os.path.exists(gpath) and lo <= 3 <= hi:
         sys.exit('跳過步驟 1，但找不到既有的圖檔：%s\n'
                  '請先執行步驟 1，或確認 mtngc.graph_dir 設定。' % gpath)
@@ -577,6 +754,9 @@ def main():
         cand = step2_colleague(cfg)
     elif lo <= 3 and not os.path.exists(cand):
         sys.exit('跳過步驟 2，但找不到候選檔：%s' % cand)
+
+    if lo <= 3 <= hi:
+        check_candidate_coverage(cfg, gpath, cand)
 
     if lo <= 3 <= hi:
         result_json = step3_analysis(cfg, gpath, cand)

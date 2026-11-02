@@ -1009,9 +1009,53 @@ def main():
     W = None
     if gpath and os.path.exists(gpath):
         W = np.load(gpath)
-        if W.shape[0] != len(names):
-            emit('  ⚠️ 圖維度 %d 與參數數 %d 不符，擴展與分組皆略過。'
-                 % (W.shape[0], len(names)))
+        # 有節點名稱側車檔時按名稱對齊，而不是靠矩陣大小。
+        # 訓練常在縮減後的參數集上進行（參數數隨 N 平方影響記憶體），
+        # 分析則保留完整參數集，兩邊的欄位集合本來就不同。
+        # 只比大小的話，大小相同而順序不同會造成無聲的索引錯位。
+        npath = os.path.splitext(gpath)[0] + '_nodes.txt'
+        if os.path.exists(npath):
+            gnames = [ln.strip() for ln in
+                      read_text_any(npath).splitlines() if ln.strip()]
+            if len(gnames) != W.shape[0]:
+                emit('  ⚠️ 節點名稱檔 %d 筆與圖維度 %d 不符，圖已停用。'
+                     % (len(gnames), W.shape[0]))
+                W = None
+            else:
+                pos = {nm: k for k, nm in enumerate(names)}
+                hit = [(k, pos[nm]) for k, nm in enumerate(gnames)
+                       if nm in pos]
+                miss = [nm for nm in gnames if nm not in pos]
+                extra = [nm for nm in names if nm not in set(gnames)]
+                if not hit:
+                    emit('  ⚠️ 圖的節點名稱與分析的參數完全不重疊，'
+                         '圖已停用。')
+                    emit('     圖的前幾個節點：%s'
+                         % ', '.join(map(str, gnames[:5])))
+                    W = None
+                else:
+                    Wf = np.zeros((len(names), len(names)), dtype=float)
+                    gi = np.array([a for a, _ in hit])
+                    ai = np.array([b for _, b in hit])
+                    Wf[np.ix_(ai, ai)] = W[np.ix_(gi, gi)]
+                    emit('  圖按名稱對齊：%d / %d 個節點對上'
+                         % (len(hit), len(gnames)))
+                    if miss:
+                        emit('    圖有但分析沒有的參數 %d 個（已忽略）：%s%s'
+                             % (len(miss), ', '.join(map(str, miss[:5])),
+                                ' …' if len(miss) > 5 else ''))
+                    if extra:
+                        emit('    分析有但圖沒有的參數 %d 個'
+                             '（視為孤立節點）：%s%s'
+                             % (len(extra),
+                                ', '.join(map(str, extra[:5])),
+                                ' …' if len(extra) > 5 else ''))
+                    W = Wf
+        elif W.shape[0] != len(names):
+            emit('  ⚠️ 圖維度 %d 與參數數 %d 不符，且無節點名稱檔，'
+                 '擴展與分組皆略過。' % (W.shape[0], len(names)))
+            emit('     訓練時若用了縮減後的參數，請確認已產生 '
+                 '%s' % os.path.basename(npath))
             W = None
     if ec.get('enabled', True) and W is not None:
         A_e, Wa_e = binarize(W, gc['edge_k'], gc['min_concentration'])
