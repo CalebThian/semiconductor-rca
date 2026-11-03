@@ -951,8 +951,14 @@ def main():
     elif lo <= 3 and not os.path.exists(cand):
         sys.exit('跳過步驟 2，但找不到候選檔：%s' % cand)
 
-    if lo <= 3 <= hi:
+    # 來源檔檢查要跟著「步驟 2 跑過」而不是「步驟 3 要跑」。
+    # 原本綁在 lo <= 3 <= hi，所以 --only 2（最常用來單測步驟 2 的指令）
+    # 反而不會檢查。
+    if os.path.exists(cand):
         check_colleague_input(cfg, cand)
+
+    # 覆蓋率要比對圖的節點，所以需要圖存在；步驟 3 的前提也是如此
+    if lo <= 3 <= hi:
         check_candidate_coverage(cfg, gpath, cand)
 
     if lo <= 3 <= hi:
