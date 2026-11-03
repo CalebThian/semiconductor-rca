@@ -574,7 +574,11 @@ def step1_train(cfg, train_csv=None):
                 rows.append((src, dst, Wm[i, j]))
     rows.sort(key=lambda r: -r[2])
 
-    epath = subst(ec['out'], ds)
+    # 邊清單是同事 pipeline 的**輸入**，所以檔名要用他被呼叫時的資料集
+    # 名稱，不是原始名稱。他以 --train_dataset case2_clean 被呼叫時會去找
+    # datasets/case2_clean_edges.csv；用原始名稱寫出 case2_edges.csv 他就
+    # 找不到。這和 colleague.output_csv 是同一類錯誤。
+    epath = subst(ec['out'], colleague_ds(cfg))
     ensure_dir(epath)
     fmt = '%%.%df' % ec.get('precision', 6)
     with open(epath, 'w', encoding='utf-8', newline='') as f:
@@ -761,6 +765,22 @@ def step2_colleague(cfg):
     script = at_cwd(cc['script'])
     if not os.path.exists(script):
         sys.exit('找不到同事的腳本：%s' % script)
+
+    # 邊清單是他的輸入。檔名由 edges.out 決定（已用 colleague_ds 的名稱
+    # 替換），但那個路徑是你設的 —— 若與他的程式從 train_dataset 推出來
+    # 的位置不符，他會找不到而以自己的方式失敗。先攔下來說清楚。
+    ep = subst(cfg.get('edges', {}).get('out', '') or '',
+               colleague_ds(cfg))
+    if ep:
+        epa = ep if os.path.isabs(ep) else os.path.join(os.getcwd(), ep)
+        if os.path.exists(epa):
+            print('邊清單：%s' % epa)
+        else:
+            print('⚠️ 找不到邊清單 %s' % epa)
+            print('   同事的 pipeline 以 --train_dataset %s 被呼叫，'
+                  '會去找帶該名稱的 edges 檔。' % colleague_ds(cfg))
+            print('   請先執行步驟 1，或確認 edges.out 的路徑與他的程式'
+                  '預期的位置一致。')
 
     py = cc.get('python') or sys.executable
     cmd = [py, script]
