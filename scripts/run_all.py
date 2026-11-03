@@ -64,9 +64,9 @@ TEMPLATE = {
         "max_params": 300,
         "mem_budget_gb": 2.0,
         "train_na_frac": 0.0,
-        "clean_out": "data/clean/{ds}_clean.csv",
+        "clean_out": "data/clean/{train_dataset}_clean.csv",
         "candidates": "",
-        "out": "data/reduced/{ds}_reduced.csv",
+        "out": "data/reduced/{train_dataset}_reduced.csv",
         "script": "scripts/reduce_params.py"
     },
 
@@ -152,9 +152,17 @@ def load_config(path):
 
 
 def subst(s, ds, gc=''):
+    """替換設定檔路徑裡的佔位符。
+
+    {train_dataset} 是正式名稱，{ds} 是別名 —— 兩者都接受，因為
+    設定檔裡兩種寫法都出現過，而沒被替換的佔位符會變成檔名的一部分
+    （實測產生了一個真的叫 "{ds}_clean.csv" 的檔案），而且不會報錯。
+    """
     if not isinstance(s, str):
         return s
-    return s.replace('{train_dataset}', ds).replace('{group_col}', gc)
+    return (s.replace('{train_dataset}', ds)
+             .replace('{ds}', ds)
+             .replace('{group_col}', gc))
 
 
 ENCODINGS = ['utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1']
@@ -340,7 +348,7 @@ def step0_prepare(cfg):
     # ---- 0a 無缺值、保留全部參數 ----
     print('')
     print('--- 0a 清除缺值（保留全部參數，供步驟 2 與步驟 0b 使用）---')
-    clean = subst(rc.get('clean_out', 'data/clean/{ds}_clean.csv'),
+    clean = subst(rc.get('clean_out', 'data/clean/{train_dataset}_clean.csv'),
                   cfg['train_dataset'])
     _run_reduce(cfg, src, clean, n_param, na_thr, '', '0a')
 
@@ -357,7 +365,7 @@ def step0_prepare(cfg):
               % (n_clean, topk))
         return clean, clean
     # 0a 已清乾淨，這一步不必再設缺值門檻
-    train = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
+    train = subst(rc.get('out', 'data/reduced/{train_dataset}_reduced.csv'),
                   cfg['train_dataset'])
     # 候選清單：reduce.candidates 未指定時，自動沿用同事上一輪的輸出。
     # 候選集由步驟 2 產生，第一輪跑 0b 時還不存在，所以第一輪沒有可釘的
@@ -584,6 +592,61 @@ def step1_train(cfg, train_csv=None):
 # =====================================================================
 # 步驟 2：執行同事的 pipeline
 # =====================================================================
+
+def check_colleague_input(cfg, cand_csv):
+    """由同事的輸出反推他實際讀了哪個檔。
+
+    run_all 印出「已複製無缺值檔」只證明複製成功，不證明他的程式讀了它
+    —— 他從 --train_dataset 自己解析路徑，中間任何一步不合就會回去讀
+    原本那份。所以這裡用他的輸出來反推：
+
+      checklist 裡出現「只存在於原始檔、不存在於清理檔」的參數
+        → 他讀的是原始檔（那些欄位在清理檔裡已被移除）
+
+    這是正向證據，不是推測。反之若全部命中清理檔，只能說「與清理檔
+    一致」—— 因為清理檔的欄位是原始檔的子集，兩邊都讀得到。
+    """
+    clean = cfg.get('_clean_csv', '')
+    if not (clean and os.path.exists(clean) and os.path.exists(cand_csv)):
+        return
+    try:
+        from pandas.api.types import is_numeric_dtype
+        ch = set(read_csv_any(clean, nrows=1).columns)
+        og = set(read_csv_any(cfg['data']['csv'], nrows=1).columns)
+        cdf = read_csv_any(cand_csv)
+    except Exception as e:
+        print('（來源檔檢查略過：%s）' % e)
+        return
+    col = cfg.get('analysis', {}).get('sensor_col', 'Sensor')
+    if col not in cdf.columns:
+        objs = [c for c in cdf.columns if not is_numeric_dtype(cdf[c])]
+        if not objs:
+            return
+        col = objs[0]
+    cands = [str(v).strip() for v in cdf[col].dropna()]
+    if not cands:
+        return
+    removed = og - ch               # 清理時被移除的欄位
+    smoking = [c for c in cands if c in removed]
+    print('')
+    print('同事讀到的資料來源檢查')
+    print('  清理檔 %d 欄／原始檔 %d 欄／清理時移除 %d 欄'
+          % (len(ch), len(og), len(removed)))
+    print('  候選 %d 個，其中 %d 個落在「清理時被移除」的欄位裡'
+          % (len(cands), len(smoking)))
+    if smoking:
+        print('  ❌ 他讀的是原始檔，不是清理檔。證據：以下候選在清理檔'
+              '裡不存在 ——')
+        print('     %s%s' % (', '.join(smoking[:10]),
+                             ' …' if len(smoking) > 10 else ''))
+        print('  請檢查 colleague.copy_clean_to 的路徑是否符合他的程式'
+              '從 train_dataset 解析出的位置，')
+        print('  以及 colleague.train_dataset 是否已設為那個名稱。')
+    else:
+        print('  ✓ 所有候選都在清理檔中，與讀清理檔一致。')
+        print('    （清理檔是原始檔的子集，所以這是必要條件而非充分條件；'
+              '上面的 ❌ 才是決定性證據。）')
+
 
 def check_candidate_coverage(cfg, gpath, cand_csv):
     """回報有多少候選參數不在圖的節點集合裡。
@@ -870,7 +933,7 @@ def main():
     # 0a 的輸出路徑先備好 —— --from-step 2 時步驟 0 不會跑，但步驟 2
     # 仍需要指向上一輪產生的無缺值檔
     cfg['_clean_csv'] = subst(
-        cfg.get('reduce', {}).get('clean_out', 'data/clean/{ds}_clean.csv'),
+        cfg.get('reduce', {}).get('clean_out', 'data/clean/{train_dataset}_clean.csv'),
         ds)
 
     if lo <= 1 <= hi:
@@ -889,6 +952,7 @@ def main():
         sys.exit('跳過步驟 2，但找不到候選檔：%s' % cand)
 
     if lo <= 3 <= hi:
+        check_colleague_input(cfg, cand)
         check_candidate_coverage(cfg, gpath, cand)
 
     if lo <= 3 <= hi:
