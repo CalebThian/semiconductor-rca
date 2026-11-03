@@ -194,7 +194,11 @@ def load_candidates(path, col, emit):
             names = df[col].astype(str).tolist()
         else:
             # 沒指定欄名時取第一個看起來像名稱的欄（非數值欄）
-            objs = [c for c in df.columns if df[c].dtype == object]
+            # 不要用 dtype == object：pandas 3 起字串欄推斷成
+            # StringDtype，object 比對永遠為 False。改以「非數值」判定，
+            # 跨版本都成立。
+            from pandas.api.types import is_numeric_dtype
+            objs = [c for c in df.columns if not is_numeric_dtype(df[c])]
             if not objs:
                 sys.exit('候選 csv 裡找不到文字欄，請用 --cand-col 指定。')
             names = df[objs[0]].astype(str).tolist()

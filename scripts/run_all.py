@@ -278,7 +278,10 @@ def _run_reduce(cfg, src, out, topk, na_thr, cand, label):
         cmd += ['--exclude', ','.join(map(str, dc['exclude']))]
     if cand and os.path.exists(cand):
         cmd += ['--candidates', os.path.abspath(cand)]
-        print('候選清單：%s（無條件保留）' % cand)
+        # 欄名由 analysis.sensor_col 指定，不要讓 reduce_params 去猜
+        sc = cfg.get('analysis', {}).get('sensor_col', '') or 'Sensor'
+        cmd += ['--cand-col', sc]
+        print('候選清單：%s（欄位 %s，無條件保留）' % (cand, sc))
     print('[%s] 執行：%s\n' % (label, ' '.join(cmd)))
     r = subprocess.run(cmd)
     if r.returncode != 0:
@@ -356,8 +359,28 @@ def step0_prepare(cfg):
     # 0a 已清乾淨，這一步不必再設缺值門檻
     train = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
                   cfg['train_dataset'])
-    _run_reduce(cfg, clean, train, topk, 1.0,
-                rc.get('candidates', ''), '0b')
+    # 候選清單：reduce.candidates 未指定時，自動沿用同事上一輪的輸出。
+    # 候選集由步驟 2 產生，第一輪跑 0b 時還不存在，所以第一輪沒有可釘的
+    # 候選；第二輪起就有了，釘住它們可讓「候選不在圖裡」的落差歸零，
+    # 而且不必手動填路徑。
+    cand = rc.get('candidates', '')
+    if not cand:
+        cc = cfg.get('colleague', {}) or {}
+        gc = cc.get('group_col', '') or ''
+        cwd = os.path.abspath(subst(cc.get('cwd', '.') or '.',
+                                    cfg['train_dataset'], gc))
+        # 同事的輸出檔名用的是他被呼叫時的資料集名稱
+        ds_use = cc.get('train_dataset', '') or cfg['train_dataset']
+        rel = subst(cc.get('output_csv', '') or '', ds_use, gc)
+        if rel:
+            auto = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
+            if os.path.exists(auto):
+                cand = auto
+                print('候選清單自動沿用同事上一輪的輸出：%s' % auto)
+            else:
+                print('（尚無候選清單 —— 第一輪必然如此。'
+                      '步驟 2 跑完後，下一輪會自動釘住候選。）')
+    _run_reduce(cfg, clean, train, topk, 1.0, cand, '0b')
     print('')
     print('步驟 2 可用：%s（%d 個參數，無缺值）' % (clean, n_clean))
     print('步驟 1 將用：%s（%d 個參數）' % (train, topk))
@@ -583,7 +606,9 @@ def check_candidate_coverage(cfg, gpath, cand_csv):
 
     col = cfg.get('analysis', {}).get('sensor_col', 'Sensor')
     if col not in cdf.columns:
-        objs = [c for c in cdf.columns if cdf[c].dtype == object]
+        # 同上：pandas 3 的字串欄不是 object dtype
+        from pandas.api.types import is_numeric_dtype
+        objs = [c for c in cdf.columns if not is_numeric_dtype(cdf[c])]
         if not objs:
             return
         col = objs[0]
