@@ -62,6 +62,7 @@ TEMPLATE = {
         "mode": "welch",
         "max_params": 300,
         "mem_budget_gb": 2.0,
+        "train_na_frac": 0.0,
         "candidates": "",
         "out": "data/reduced/{ds}_reduced.csv",
         "script": "scripts/reduce_params.py"
@@ -276,7 +277,7 @@ def step0_reduce(cfg):
     if not os.path.exists(src):
         sys.exit('找不到資料檔：%s' % src)
 
-    banner(0, '參數縮減（訓練用）')
+    banner(0, '訓練資料前處理（缺值 + 參數縮減）')
 
     # 參數數已經夠少時不必多繞一步。只讀表頭，5000 欄的檔案不必全讀。
     head = read_csv_any(src, nrows=5)
@@ -298,9 +299,18 @@ def step0_reduce(cfg):
     print('max_params %d → 取兩者較小：%d'
           % (int(rc.get('max_params', 300)), topk))
 
+    # 訓練用的缺值門檻。預設 0 = 任何含缺值的欄位都不要 ——
+    # 訓練完全無法容忍缺值（一格 NaN 毀掉整張圖），而分析階段可以
+    # （run_pipeline 自己有 NA 處理，且聚合會略過 NaN）。
+    # 所以兩邊用不同的門檻，不要共用 data.drop_col_na_frac。
+    na_thr = float(rc.get('train_na_frac', 0.0))
+    print('訓練用缺值門檻 %.2f（0 = 任何含缺值的欄位都排除）' % na_thr)
+
     if n_param <= topk:
-        print('參數數已不超過 %d，略過縮減。' % topk)
-        return src
+        # 不需要縮減，但仍可能需要清缺值。改以「保留全部參數」的方式
+        # 跑一趟，讓輸出檔無缺值。
+        print('參數數已不超過 %d，不縮減；仍會清除含缺值的欄位。' % topk)
+        topk = n_param
 
     out = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
                 cfg['train_dataset'])
@@ -317,9 +327,10 @@ def step0_reduce(cfg):
            '--topk', str(topk),
            '--mode', rc.get('mode', 'welch'),
            '--lookback', str(lb), '--hidden', str(hd),
-           # 用分析階段的同一個 NA 門檻 —— 否則這裡選出的參數會在
-           # 步驟 3 被丟掉，而圖是在這些參數上訓練的，節點就對不上
-           '--max-na-frac', str(dc.get('drop_col_na_frac', 0.5)),
+           # 訓練不能有任何缺值，門檻預設 0。這也順便讓選出的參數
+           # 必然通得過分析階段的 drop_col_na_frac（那個門檻較寬），
+           # 所以兩邊的節點集合不會因缺值而對不上。
+           '--max-na-frac', str(na_thr),
            '--out', os.path.abspath(out)]
     if dc.get('exclude'):
         cmd += ['--exclude', ','.join(map(str, dc['exclude']))]
@@ -462,10 +473,31 @@ def step1_train(cfg, train_csv=None):
         print('  已對 %d 個 seed 取平均（圖的訓練具隨機性，平均可降低變異）'
               % n_seed)
 
+    # 存圖之前先確認它不是退化的。訓練輸入只要有一格 NaN，標準化就會把
+    # 整欄變 NaN，進而讓所有 predictor 的權重變 NaN —— 實測 2/6000 格
+    # 缺值即可讓 20 個 predictor 全毀。那樣存出來的圖沒有邊，二值化後
+    # 每個候選自成一組，看起來完全像「圖沒找到結構」而不是「訓練失敗」。
+    n_bad = int((~np.isfinite(W)).sum())
+    off = W[~np.eye(W.shape[0], dtype=bool)]
+    if n_bad:
+        sys.exit('❌ 圖有 %d / %d 格非有限值，訓練已發散。\n'
+                 '   最常見的原因是訓練資料含缺值：標準化會把含 NaN 的欄'
+                 '整欄變成 NaN。\n'
+                 '   請確認步驟 0 已產生無缺值的訓練檔'
+                 '（reduce.train_na_frac），或檢查資料來源。'
+                 % (n_bad, W.size))
+    if np.abs(off).max() == 0:
+        sys.exit('❌ 圖的非對角元素全為 0，沒有任何邊。\n'
+                 '   這不是「找不到結構」而是訓練沒有學到東西 —— '
+                 '請檢查訓練資料是否含缺值、\n'
+                 '   或 lambda_sparse（目前 %s）是否過大。'
+                 % mc.get('lambda_sparse'))
+
     gpath = graph_path(cfg)
     ensure_dir(gpath)
     np.save(gpath, W)
-    print('圖已存：%s' % gpath)
+    print('圖已存：%s（非零邊 %d，最大值 %.4g）'
+          % (gpath, int((off != 0).sum()), float(np.abs(off).max())))
 
     # 節點名稱側車檔。沒有它的話，步驟 3 只能比對矩陣大小 —— 而縮減參數
     # 或 NA 丟欄都會改變欄位集合，大小相同但順序不同時索引會錯而無人知曉。

@@ -136,7 +136,13 @@ class PerTargetMLP(nn.Module):
         acc = acc.index_add(0, self.gid, sq)        # sum of squares per var
         pos = acc > 0
         safe = torch.where(pos, acc, torch.ones_like(acc))
-        return torch.where(pos, safe.sqrt(), torch.zeros_like(acc))
+        out = torch.where(pos, safe.sqrt(), torch.zeros_like(acc))
+        # `acc > 0` is False for NaN as well as for a true zero, so without
+        # this line a diverged predictor (NaN weights, e.g. from a single NaN
+        # in the input) would report importance 0 — an all-zero graph row that
+        # looks exactly like "no structure found" rather than "training
+        # failed". Put the NaN back so the caller can see it.
+        return torch.where(torch.isfinite(acc), out, acc)
 
     def group_lasso_loss(self) -> torch.Tensor:
         """Compute group-lasso penalty on first-layer weights.

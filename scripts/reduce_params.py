@@ -136,10 +136,13 @@ def parse_args():
     p.add_argument('--cand-col', default=None,
                    help='candidates 為 csv 時，參數名稱所在的欄名')
     p.add_argument('--max-na-frac', type=float, default=1.0,
-                   help='缺值比例超過此值的參數排除在排序之外。'
-                        '應與分析階段的 data.drop_col_na_frac 一致，'
-                        '否則選出的參數會在分析階段被丟掉，'
-                        '圖與分析的節點就對不上（1.0 = 不限制）')
+                   help='缺值比例超過此值的參數排除在排序之外，'
+                        '輸出檔也不含它們。0 = 任何含缺值的欄位都排除。'
+                        '訓練用請設 0（一格 NaN 會讓標準化把整欄變 NaN，'
+                        '進而毀掉整張圖）；分析用可放寬，'
+                        '但不可大於分析階段的 data.drop_col_na_frac，'
+                        '否則選出的參數會在分析階段被丟掉而與圖對不上。'
+                        '（1.0 = 不限制）')
     p.add_argument('--near-const-frac', type=float, default=1e-8,
                    help='變異數小於「全體最大變異數 × 此值」視為近常數')
     p.add_argument('--dup-corr', type=float, default=0.999,
@@ -289,8 +292,9 @@ def main():
     # 兩邊的節點集合就對不上。
     if args.max_na_frac < 1.0:
         emit('')
-        emit('[0] 高缺值欄（門檻 %.0f%%，與分析階段一致）'
-             % (100.0 * args.max_na_frac))
+        emit('[0] 高缺值欄（門檻 %.0f%%%s）'
+             % (100.0 * args.max_na_frac,
+                '，即任何含缺值的欄位' if args.max_na_frac <= 0 else ''))
         nf = raw[cols].isna().mean()
         drop_na = [c for c in cols
                    if nf[c] > args.max_na_frac and c not in set(cand)]
