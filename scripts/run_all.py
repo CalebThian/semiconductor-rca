@@ -63,6 +63,7 @@ TEMPLATE = {
         "max_params": 300,
         "mem_budget_gb": 2.0,
         "train_na_frac": 0.0,
+        "clean_out": "data/clean/{ds}_clean.csv",
         "candidates": "",
         "out": "data/reduced/{ds}_reduced.csv",
         "script": "scripts/reduce_params.py"
@@ -100,6 +101,8 @@ TEMPLATE = {
         "python": "",
         "group_col": "",
         "use_config": False,
+        "train_dataset": "",
+        "csv_arg": "",
         "output_csv": "experiment_results/checklist/checklist_{train_dataset}_{group_col}.csv"
     },
 
@@ -244,42 +247,71 @@ def top_edges(W, k):
     return A
 
 
-def step0_reduce(cfg):
-    """訓練前的參數縮減。回傳要給訓練用的 csv 路徑。
+def _run_reduce(cfg, src, out, topk, na_thr, cand, label):
+    """呼叫 reduce_params.py。step0a 與 step0b 共用。
 
-    為什麼在訓練前而不是分析前
-    --------------------------
-      MT-NGC 的參數量約 N² × lookback × hidden，N=5000 時達 48 億個，
-      超過 int32 上限兩倍以上而崩潰。分析階段的 Welch 檢定是 O(N)，
-      5000 個參數毫無壓力 —— 所以只有訓練需要縮減。
+    reduce_params 的輸出只含被選中的欄位，所以 --max-na-frac 0 會產出
+    一個完全無缺值的檔：任何含缺值的欄位都不被選中，因此不必丟列，
+    時間軸保持完整。這一點對 Granger 類方法很關鍵 —— 丟列會在時間軸上
+    打洞，而 ffill 會製造虛假的滯後自相關（實測約等於缺值比例）。
+    """
+    dc = cfg['data']
+    mc = cfg['mtngc']
+    ensure_dir(out)
+    script = cfg.get('reduce', {}).get('script', 'scripts/reduce_params.py')
+    if not os.path.exists(script):
+        sys.exit('找不到縮減腳本：%s' % script)
+    cmd = [sys.executable, os.path.abspath(script),
+           '--csv', os.path.abspath(src),
+           '--wafer-col', dc['wafer_col'],
+           '--label-col', dc['label_col'],
+           '--abnormal-value', str(dc.get('abnormal_value', 'Abnormal')),
+           '--topk', str(topk),
+           '--mode', cfg.get('reduce', {}).get('mode', 'welch'),
+           '--lookback', str(int(mc['lookback'])),
+           '--hidden', str(int(mc['hidden_dim'])),
+           '--max-na-frac', str(na_thr),
+           '--out', os.path.abspath(out)]
+    if dc.get('exclude'):
+        cmd += ['--exclude', ','.join(map(str, dc['exclude']))]
+    if cand and os.path.exists(cand):
+        cmd += ['--candidates', os.path.abspath(cand)]
+        print('候選清單：%s（無條件保留）' % cand)
+    print('[%s] 執行：%s\n' % (label, ' '.join(cmd)))
+    r = subprocess.run(cmd)
+    if r.returncode != 0:
+        sys.exit('%s 回傳錯誤碼 %d。' % (label, r.returncode))
+    if not os.path.exists(out):
+        sys.exit('%s 未產生 %s。' % (label, out))
+    return out
 
-      兩邊用不同的參數集之所以可行，是因為圖存了節點名稱側車檔，
-      步驟 3 按名稱對齊，圖裡沒有的參數視為孤立節點。
 
-    為什麼預設用 welch 而不是 variance
-      變異數排序會漏掉真根因 —— 實測一個真根因在 Normal 變異數排
-      2446/5000，Welch 排第 3。好根因的特徵正是「正常時安靜、
-      異常時偏移」，那在變異數上看不出來。
+def step0_prepare(cfg):
+    """步驟 0：產出兩個檔案，回傳 (無缺值全參數檔, 訓練用縮減檔)。
 
-      代價：選欄用到了標籤，所以之後不可主張「圖未看過標籤」。
-      對 B 軌可接受（圖只用於分組已由 Welch 排出的候選）；A 軌若要
-      主張無監督發現，請改 mode = "variance"。
+    三個階段需要不同的輸入，不可共用一個檔：
+
+      步驟 1 訓練   無缺值 + 縮減   —— 參數量隨 N 平方，且一格 NaN
+                                      會讓標準化把整欄變 NaN
+      步驟 2 候選集 無缺值 + 全參數 —— 候選要涵蓋全部參數，否則它就
+                                      不再是獨立於 Welch 的第二個意見；
+                                      但同事的 pipeline 不處理缺值
+      步驟 3 分析   原始檔          —— Welch 是 O(N)，且 run_pipeline
+                                      自己有 NA 處理
+
+    0a 產出的無缺值全參數檔同時供步驟 2 使用（見 colleague 區塊的說明）。
     """
     rc = cfg.get('reduce', {}) or {}
     dc = cfg['data']
-    src = dc.get('train_csv') or dc['csv']
-
-    if not rc.get('enabled', True):
-        return src
-    if dc.get('train_csv'):
-        print('（data.train_csv 已指定，略過參數縮減）')
-        return src
+    src = dc['csv']
     if not os.path.exists(src):
         sys.exit('找不到資料檔：%s' % src)
+    if not rc.get('enabled', True):
+        print('（reduce.enabled 為 false，步驟 0 整段略過）')
+        return src, (dc.get('train_csv') or src)
 
-    banner(0, '訓練資料前處理（缺值 + 參數縮減）')
+    banner(0, '訓練與候選集的資料前處理')
 
-    # 參數數已經夠少時不必多繞一步。只讀表頭，5000 欄的檔案不必全讀。
     head = read_csv_any(src, nrows=5)
     meta = {'LOT_ID', 'WFR_ID', 'WAFER_ID', 'START_DATETIME',
             'END_DATETIME', dc['label_col']}
@@ -289,69 +321,45 @@ def step0_reduce(cfg):
 
     mc = cfg['mtngc']
     lb, hd = int(mc['lookback']), int(mc['hidden_dim'])
-    # 由記憶體預算反推 N：權重 + Adam 的兩份動量 = 3 份 float32
     budget = float(rc.get('mem_budget_gb', 2.0)) * 1024 ** 3
     n_mem = int((budget / (12.0 * lb * hd)) ** 0.5)
     topk = min(int(rc.get('max_params', 300)), n_mem)
-    print('目前參數 %d 個' % n_param)
+    na_thr = float(rc.get('train_na_frac', 0.0))
+    print('原始參數 %d 個' % n_param)
+    print('缺值門檻 %.2f（0 = 任何含缺值的欄位都排除）' % na_thr)
     print('記憶體預算 %.1f GB（lookback=%d, hidden=%d）→ 上限 %d 個'
           % (rc.get('mem_budget_gb', 2.0), lb, hd, n_mem))
-    print('max_params %d → 取兩者較小：%d'
-          % (int(rc.get('max_params', 300)), topk))
+    print('訓練保留 min(max_params=%d, %d) = %d 個'
+          % (int(rc.get('max_params', 300)), n_mem, topk))
 
-    # 訓練用的缺值門檻。預設 0 = 任何含缺值的欄位都不要 ——
-    # 訓練完全無法容忍缺值（一格 NaN 毀掉整張圖），而分析階段可以
-    # （run_pipeline 自己有 NA 處理，且聚合會略過 NaN）。
-    # 所以兩邊用不同的門檻，不要共用 data.drop_col_na_frac。
-    na_thr = float(rc.get('train_na_frac', 0.0))
-    print('訓練用缺值門檻 %.2f（0 = 任何含缺值的欄位都排除）' % na_thr)
+    # ---- 0a 無缺值、保留全部參數 ----
+    print('')
+    print('--- 0a 清除缺值（保留全部參數，供步驟 2 與步驟 0b 使用）---')
+    clean = subst(rc.get('clean_out', 'data/clean/{ds}_clean.csv'),
+                  cfg['train_dataset'])
+    _run_reduce(cfg, src, clean, n_param, na_thr, '', '0a')
 
-    if n_param <= topk:
-        # 不需要縮減，但仍可能需要清缺值。改以「保留全部參數」的方式
-        # 跑一趟，讓輸出檔無缺值。
-        print('參數數已不超過 %d，不縮減；仍會清除含缺值的欄位。' % topk)
-        topk = n_param
-
-    out = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
-                cfg['train_dataset'])
-    ensure_dir(out)
-    script = rc.get('script', 'scripts/reduce_params.py')
-    if not os.path.exists(script):
-        sys.exit('找不到縮減腳本：%s' % script)
-
-    cmd = [sys.executable, os.path.abspath(script),
-           '--csv', os.path.abspath(src),
-           '--wafer-col', dc['wafer_col'],
-           '--label-col', dc['label_col'],
-           '--abnormal-value', str(dc.get('abnormal_value', 'Abnormal')),
-           '--topk', str(topk),
-           '--mode', rc.get('mode', 'welch'),
-           '--lookback', str(lb), '--hidden', str(hd),
-           # 訓練不能有任何缺值，門檻預設 0。這也順便讓選出的參數
-           # 必然通得過分析階段的 drop_col_na_frac（那個門檻較寬），
-           # 所以兩邊的節點集合不會因缺值而對不上。
-           '--max-na-frac', str(na_thr),
-           '--out', os.path.abspath(out)]
-    if dc.get('exclude'):
-        cmd += ['--exclude', ','.join(map(str, dc['exclude']))]
-    cand = rc.get('candidates', '')
-    if cand and os.path.exists(cand):
-        cmd += ['--candidates', os.path.abspath(cand)]
-        print('候選清單：%s（無條件保留）' % cand)
-    else:
-        # 候選集由步驟 2 產生，在此時還不存在。welch 模式下兩者的排序
-        # 依據相同，重疊度高；但仍可能漏掉候選，所以步驟 2 之後會回報
-        # 有多少候選不在圖裡。
-        print('（尚無候選清單；步驟 2 之後會回報候選與圖的覆蓋率）')
-
-    print('執行：%s\n' % ' '.join(cmd))
-    r = subprocess.run(cmd)
-    if r.returncode != 0:
-        sys.exit('參數縮減回傳錯誤碼 %d。' % r.returncode)
-    if not os.path.exists(out):
-        sys.exit('縮減腳本未產生 %s。' % out)
-    print('\n訓練將使用：%s' % out)
-    return out
+    # ---- 0b 由 0a 的輸出再縮減給訓練 ----
+    print('')
+    print('--- 0b 縮減參數（訓練用）---')
+    if dc.get('train_csv'):
+        print('（data.train_csv 已指定為 %s，略過 0b）' % dc['train_csv'])
+        return clean, dc['train_csv']
+    ch = read_csv_any(clean, nrows=5)
+    n_clean = len([c for c in ch.columns if c not in meta])
+    if n_clean <= topk:
+        print('清除缺值後只剩 %d 個參數，不超過 %d，直接用 0a 的輸出訓練。'
+              % (n_clean, topk))
+        return clean, clean
+    # 0a 已清乾淨，這一步不必再設缺值門檻
+    train = subst(rc.get('out', 'data/reduced/{ds}_reduced.csv'),
+                  cfg['train_dataset'])
+    _run_reduce(cfg, clean, train, topk, 1.0,
+                rc.get('candidates', ''), '0b')
+    print('')
+    print('步驟 2 可用：%s（%d 個參數，無缺值）' % (clean, n_clean))
+    print('步驟 1 將用：%s（%d 個參數）' % (train, topk))
+    return clean, train
 
 
 def step1_train(cfg, train_csv=None):
@@ -625,7 +633,36 @@ def step2_colleague(cfg):
         if not os.path.exists(conf):
             sys.exit('找不到同事的 config：%s' % conf)
         cmd += ['--config', conf]
-    cmd += ['--train_dataset', ds]
+    # 同事的 pipeline 自己從 --train_dataset 解析資料路徑，run_all 無法
+    # 指定它讀哪個檔。但他的程式不處理缺值，而原始檔有缺值 —— 所以要
+    # 讓它改讀步驟 0a 的無缺值全參數檔。兩種做法：
+    #
+    #   1. colleague.train_dataset：把 0a 的輸出複製到他的資料目錄、
+    #      取一個新的資料集名稱，再以那個名稱呼叫。他不必改任何程式。
+    #   2. colleague.csv_arg：他的程式若支援指定 csv（例如 --csv），
+    #      填入那個參數名即可。
+    #
+    # 不要用縮減後的檔 —— 候選集只能從縮減後的參數裡挑，而縮減用的是
+    # Welch，候選集就不再是獨立於 Welch 的第二個意見了。
+    ds_use = cc.get('train_dataset', '') or ds
+    if ds_use != ds:
+        print('資料集名稱：%s（colleague.train_dataset 覆寫，原為 %s）'
+              % (ds_use, ds))
+    cmd += ['--train_dataset', ds_use]
+    ca = cc.get('csv_arg', '')
+    if ca:
+        clean = cfg.get('_clean_csv', '')
+        if clean and os.path.exists(clean):
+            cmd += [ca, os.path.abspath(clean)]
+            print('以 %s 指定無缺值檔：%s' % (ca, clean))
+        else:
+            print('⚠️ colleague.csv_arg 已設定，但找不到步驟 0a 的輸出，'
+                  '同事的 pipeline 將讀它自己的資料（可能含缺值）。')
+    elif ds_use == ds:
+        print('⚠️ 同事的 pipeline 讀它自己解析的資料檔。若該檔含缺值而'
+              '他的程式不處理，')
+        print('   請用 colleague.train_dataset 或 colleague.csv_arg '
+              '指向步驟 0a 的輸出。')
     print('工作目錄：%s' % cwd)
     print('執行：%s' % ' '.join(cmd))
     t0 = time.time()
@@ -774,9 +811,17 @@ def main():
     cand = _co if os.path.isabs(_co) else os.path.join(_ccwd, _co)
     result_json = subst(cfg['analysis']['prefix'], ds) + '_result.json'
 
+    # 0a 的輸出路徑先備好 —— --from-step 2 時步驟 0 不會跑，但步驟 2
+    # 仍需要指向上一輪產生的無缺值檔
+    cfg['_clean_csv'] = subst(
+        cfg.get('reduce', {}).get('clean_out', 'data/clean/{ds}_clean.csv'),
+        ds)
+
     if lo <= 1 <= hi:
-        # 步驟 0 只在要訓練時才需要 —— 它的輸出只給訓練用
-        train_csv = step0_reduce(cfg)
+        # 0a 的輸出（無缺值、全參數）步驟 2 也要用，所以步驟 0 不能
+        # 只在要訓練時才跑
+        clean_csv, train_csv = step0_prepare(cfg)
+        cfg['_clean_csv'] = clean_csv
         gpath, _ = step1_train(cfg, train_csv)
     elif not os.path.exists(gpath) and lo <= 3 <= hi:
         sys.exit('跳過步驟 1，但找不到既有的圖檔：%s\n'
