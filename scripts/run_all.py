@@ -103,8 +103,9 @@ TEMPLATE = {
         "group_col": "",
         "use_config": False,
         "train_dataset": "",
+        "dataset_suffix": "_clean",
         "csv_arg": "",
-        "copy_clean_to": "",
+        "copy_clean_to": "data/{train_dataset}.csv",
         "output_csv": "experiment_results/checklist/checklist_{train_dataset}_{group_col}.csv"
     },
 
@@ -378,8 +379,8 @@ def step0_prepare(cfg):
         cwd = os.path.abspath(subst(cc.get('cwd', '.') or '.',
                                     cfg['train_dataset'], gc))
         # 同事的輸出檔名用的是他被呼叫時的資料集名稱
-        ds_use = cc.get('train_dataset', '') or cfg['train_dataset']
-        rel = subst(cc.get('output_csv', '') or '', ds_use, gc)
+        rel = subst(cc.get('output_csv', '') or '',
+                    colleague_ds(cfg), gc)
         if rel:
             auto = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
             if os.path.exists(auto):
@@ -593,6 +594,31 @@ def step1_train(cfg, train_csv=None):
 # 步驟 2：執行同事的 pipeline
 # =====================================================================
 
+def colleague_ds(cfg):
+    """同事的 pipeline 實際被呼叫時用的資料集名稱。
+
+    他自己從 --train_dataset 解析資料路徑，所以要讓他讀步驟 0a 的
+    無缺值檔，就得餵他一個不同的名稱。優先序：
+
+      colleague.train_dataset  明確指定（完全覆寫）
+      colleague.dataset_suffix 在原名後加後綴，預設 "_clean"
+      兩者皆空                  用原名（他會讀自己原本那份，含缺值）
+
+    這個名稱必須同時用在三個地方，否則就會錯開：
+      1. 傳給他的 --train_dataset
+      2. 他的 output_csv 檔名裡的 {train_dataset}
+      3. 複製無缺值檔的目的檔名
+    先前第 2 項用的是原始名稱，於是他寫出 checklist_case2_clean_.csv
+    而 run_all 去找 checklist_case2_.csv，找不到。
+    """
+    cc = cfg.get('colleague', {}) or {}
+    ds = cfg['train_dataset']
+    explicit = cc.get('train_dataset', '') or ''
+    if explicit:
+        return explicit
+    return ds + (cc.get('dataset_suffix', '') or '')
+
+
 def check_colleague_input(cfg, cand_csv):
     """由同事的輸出反推他實際讀了哪個檔。
 
@@ -706,7 +732,9 @@ def step2_colleague(cfg):
         sys.exit('找不到同事的工作目錄：%s' % cwd)
 
     def at_cwd(rel):
-        rel = subst(rel, ds, gc)
+        # 用同事實際被呼叫的名稱替換，而不是原始名稱 —— 他的 output_csv
+        # 檔名裡的 {train_dataset} 會是那個名稱
+        rel = subst(rel, colleague_ds(cfg), gc)
         return rel if os.path.isabs(rel) else os.path.join(cwd, rel)
 
     script = at_cwd(cc['script'])
@@ -736,6 +764,10 @@ def step2_colleague(cfg):
     # Welch，候選集就不再是獨立於 Welch 的第二個意見了。
     # 自動把 0a 的無缺值檔放到同事的資料目錄，省掉手動 cp。
     # 路徑相對於 colleague.cwd 解析，搭配 colleague.train_dataset 使用。
+    # 注意：copy_clean_to 裡的 {train_dataset} 會被替換成「同事被呼叫時
+    # 用的名稱」（含後綴），不是原始名稱。所以預設值寫
+    # data/{train_dataset}.csv 就會變成 data/case2_clean.csv，
+    # 不要再自己加一次 _clean。
     dst_rel = cc.get('copy_clean_to', '') or ''
     if dst_rel:
         clean = cfg.get('_clean_csv', '')
@@ -763,10 +795,13 @@ def step2_colleague(cfg):
         shutil.copyfile(clean, dst)
         print('已複製無缺值檔 → %s' % dst)
 
-    ds_use = cc.get('train_dataset', '') or ds
+    ds_use = colleague_ds(cfg)
     if ds_use != ds:
-        print('資料集名稱：%s（colleague.train_dataset 覆寫，原為 %s）'
-              % (ds_use, ds))
+        why = ('colleague.train_dataset 指定'
+               if (cc.get('train_dataset', '') or '')
+               else 'colleague.dataset_suffix="%s"'
+                    % (cc.get('dataset_suffix', '') or ''))
+        print('餵給同事的資料集名稱：%s（%s；原為 %s）' % (ds_use, why, ds))
     cmd += ['--train_dataset', ds_use]
     ca = cc.get('csv_arg', '')
     if ca:
@@ -778,10 +813,10 @@ def step2_colleague(cfg):
             print('⚠️ colleague.csv_arg 已設定，但找不到步驟 0a 的輸出，'
                   '同事的 pipeline 將讀它自己的資料（可能含缺值）。')
     elif ds_use == ds:
-        print('⚠️ 同事的 pipeline 讀它自己解析的資料檔。若該檔含缺值而'
-              '他的程式不處理，')
-        print('   請用 colleague.train_dataset 或 colleague.csv_arg '
-              '指向步驟 0a 的輸出。')
+        print('⚠️ 餵給同事的資料集名稱與原始相同，他會讀自己原本那份'
+              '（可能含缺值）。')
+        print('   請設 colleague.dataset_suffix（預設 "_clean"）或 '
+              'colleague.train_dataset。')
     print('工作目錄：%s' % cwd)
     print('執行：%s' % ' '.join(cmd))
     t0 = time.time()
@@ -926,7 +961,9 @@ def main():
     _gc = cfg['colleague'].get('group_col', '') or ''
     _ccwd = os.path.abspath(subst(cfg['colleague'].get('cwd', '.') or '.',
                                   ds, _gc))
-    _co = subst(cfg['colleague']['output_csv'], ds, _gc)
+    # 候選檔名用的是同事實際被呼叫的資料集名稱，不是原始名稱
+    _co = subst(cfg['colleague']['output_csv'],
+                colleague_ds(cfg), _gc)
     cand = _co if os.path.isabs(_co) else os.path.join(_ccwd, _co)
     result_json = subst(cfg['analysis']['prefix'], ds) + '_result.json'
 
