@@ -36,6 +36,7 @@ import argparse
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -103,6 +104,7 @@ TEMPLATE = {
         "use_config": False,
         "train_dataset": "",
         "csv_arg": "",
+        "copy_clean_to": "",
         "output_csv": "experiment_results/checklist/checklist_{train_dataset}_{group_col}.csv"
     },
 
@@ -644,6 +646,35 @@ def step2_colleague(cfg):
     #
     # 不要用縮減後的檔 —— 候選集只能從縮減後的參數裡挑，而縮減用的是
     # Welch，候選集就不再是獨立於 Welch 的第二個意見了。
+    # 自動把 0a 的無缺值檔放到同事的資料目錄，省掉手動 cp。
+    # 路徑相對於 colleague.cwd 解析，搭配 colleague.train_dataset 使用。
+    dst_rel = cc.get('copy_clean_to', '') or ''
+    if dst_rel:
+        clean = cfg.get('_clean_csv', '')
+        if not (clean and os.path.exists(clean)):
+            sys.exit('colleague.copy_clean_to 已設定，但找不到步驟 0a 的'
+                     '輸出：%s\n   請先執行步驟 1（會跑步驟 0），'
+                     '或確認 reduce.clean_out 設定。' % clean)
+        dst = at_cwd(dst_rel)
+        # 防止覆蓋同事的原始資料。最危險的情況是把 copy_clean_to 指到
+        # 他原本那份檔案 —— 那會在他不知情的情況下改掉他的輸入。
+        orig = os.path.abspath(cfg['data']['csv'])
+        if os.path.abspath(dst) == orig:
+            sys.exit('colleague.copy_clean_to 指向 data.csv 本身（%s），'
+                     '拒絕覆寫原始資料。' % orig)
+        stem = os.path.splitext(os.path.basename(dst))[0]
+        if stem == ds and not cc.get('train_dataset', ''):
+            sys.exit('colleague.copy_clean_to 的檔名主幹是 "%s"，與'
+                     'train_dataset 同名，\n   這會覆蓋同事原本讀的那份'
+                     '資料。請改用別的名稱（例如 %s_clean），\n'
+                     '   並把 colleague.train_dataset 設為該名稱。'
+                     % (ds, ds))
+        d = os.path.dirname(dst)
+        if d and not os.path.isdir(d):
+            os.makedirs(d)
+        shutil.copyfile(clean, dst)
+        print('已複製無缺值檔 → %s' % dst)
+
     ds_use = cc.get('train_dataset', '') or ds
     if ds_use != ds:
         print('資料集名稱：%s（colleague.train_dataset 覆寫，原為 %s）'
