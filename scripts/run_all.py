@@ -102,8 +102,9 @@ TEMPLATE = {
         "python": "",
         "group_col": "",
         "use_config": False,
+        "source": "reduced",
         "train_dataset": "",
-        "dataset_suffix": "_clean",
+        "dataset_suffix": "",
         "csv_arg": "",
         "copy_clean_to": "data/{train_dataset}.csv",
         "output_csv": "experiment_results/checklist/checklist_{train_dataset}_{group_col}.csv"
@@ -389,8 +390,13 @@ def step0_prepare(cfg):
                       '步驟 2 跑完後，下一輪會自動釘住候選。）')
     _run_reduce(cfg, clean, train, topk, 1.0, cand, '0b')
     print('')
-    print('步驟 2 可用：%s（%d 個參數，無缺值）' % (clean, n_clean))
     print('步驟 1 將用：%s（%d 個參數）' % (train, topk))
+    csrc, _s2, lbl2 = colleague_source(cfg)
+    print('步驟 2 將用：%s（%s，由 colleague.source 決定）' % (csrc, lbl2))
+    if lbl2 == '縮減檔':
+        print('  註：候選集因此只能從 Welch 選出的參數裡挑 —— '
+              '覆蓋率落差消失，')
+        print('      但候選集不再獨立於 Welch 排序，方法說明需據此調整。')
     return clean, train
 
 
@@ -619,6 +625,30 @@ def derived_path(cfg, key, suffix):
     return out
 
 
+def colleague_source(cfg):
+    """同事的 pipeline 要吃哪一份資料，回傳 (路徑, 後綴, 說明)。
+
+    colleague.source:
+      "reduced"（預設）步驟 0b 的縮減檔。候選集因此只能從 Welch 選出的
+                      參數裡挑 —— 覆蓋率落差消失（候選必然都是圖的節點），
+                      但候選集不再獨立於 Welch 排序。方法說明要據此調整。
+      "clean"         步驟 0a 的無缺值全參數檔。候選涵蓋全部可用參數，
+                      仍是獨立於 Welch 的第二個意見，代價是部分候選可能
+                      不在圖裡（由 check_candidate_coverage 回報）。
+      "original"      原始檔。他的程式不處理缺值時不要用。
+    """
+    cc = cfg.get('colleague', {}) or {}
+    src = (cc.get('source', '') or 'reduced').lower()
+    if src == 'reduced':
+        return derived_path(cfg, 'out', '_reduced'), '_reduced', '縮減檔'
+    if src == 'clean':
+        return derived_path(cfg, 'clean_out', '_clean'), '_clean', '無缺值檔'
+    if src == 'original':
+        return cfg['data']['csv'], '', '原始檔'
+    sys.exit('colleague.source 只能是 reduced / clean / original，'
+             '收到 "%s"。' % src)
+
+
 def colleague_ds(cfg):
     """同事的 pipeline 實際被呼叫時用的資料集名稱。
 
@@ -641,7 +671,12 @@ def colleague_ds(cfg):
     explicit = cc.get('train_dataset', '') or ''
     if explicit:
         return explicit
-    return ds + (cc.get('dataset_suffix', '') or '')
+    # dataset_suffix 未指定時由 colleague.source 推導，兩者才不會錯開
+    # （餵縮減檔卻叫 case2_clean 會誤導）
+    sfx = cc.get('dataset_suffix', None)
+    if sfx is None or sfx == '':
+        sfx = colleague_source(cfg)[1]
+    return ds + sfx
 
 
 def check_colleague_input(cfg, cand_csv):
@@ -657,9 +692,11 @@ def check_colleague_input(cfg, cand_csv):
     這是正向證據，不是推測。反之若全部命中清理檔，只能說「與清理檔
     一致」—— 因為清理檔的欄位是原始檔的子集，兩邊都讀得到。
     """
-    clean = cfg.get('_clean_csv', '')
+    clean, _sfx, lbl = colleague_source(cfg)
     if not (clean and os.path.exists(clean) and os.path.exists(cand_csv)):
         return
+    if os.path.abspath(clean) == os.path.abspath(cfg['data']['csv']):
+        return          # source=original 時沒有可比的差集
     try:
         from pandas.api.types import is_numeric_dtype
         ch = set(read_csv_any(clean, nrows=1).columns)
@@ -680,23 +717,23 @@ def check_colleague_input(cfg, cand_csv):
     removed = og - ch               # 清理時被移除的欄位
     smoking = [c for c in cands if c in removed]
     print('')
-    print('同事讀到的資料來源檢查')
-    print('  清理檔 %d 欄／原始檔 %d 欄／清理時移除 %d 欄'
-          % (len(ch), len(og), len(removed)))
-    print('  候選 %d 個，其中 %d 個落在「清理時被移除」的欄位裡'
+    print('同事讀到的資料來源檢查（應為%s）' % lbl)
+    print('  %s %d 欄／原始檔 %d 欄／差集 %d 欄'
+          % (lbl, len(ch), len(og), len(removed)))
+    print('  候選 %d 個，其中 %d 個落在「只存在於原始檔」的欄位裡'
           % (len(cands), len(smoking)))
     if smoking:
-        print('  ❌ 他讀的是原始檔，不是清理檔。證據：以下候選在清理檔'
-              '裡不存在 ——')
+        print('  ❌ 他讀的不是%s。證據：以下候選在%s裡不存在 ——'
+              % (lbl, lbl))
         print('     %s%s' % (', '.join(smoking[:10]),
                              ' …' if len(smoking) > 10 else ''))
         print('  請檢查 colleague.copy_clean_to 的路徑是否符合他的程式'
               '從 train_dataset 解析出的位置，')
         print('  以及 colleague.train_dataset 是否已設為那個名稱。')
     else:
-        print('  ✓ 所有候選都在清理檔中，與讀清理檔一致。')
-        print('    （清理檔是原始檔的子集，所以這是必要條件而非充分條件；'
-              '上面的 ❌ 才是決定性證據。）')
+        print('  ✓ 所有候選都在%s中，與讀%s一致。' % (lbl, lbl))
+        print('    （%s是原始檔的子集，所以這是必要條件而非充分條件；'
+              '上面的 ❌ 才是決定性證據。）' % lbl)
 
 
 def check_candidate_coverage(cfg, gpath, cand_csv):
@@ -811,11 +848,11 @@ def step2_colleague(cfg):
     # 不要再自己加一次 _clean。
     dst_rel = cc.get('copy_clean_to', '') or ''
     if dst_rel:
-        clean = cfg.get('_clean_csv', '')
-        if not (clean and os.path.exists(clean)):
-            sys.exit('colleague.copy_clean_to 已設定，但找不到步驟 0a 的'
-                     '輸出：%s\n   請先執行步驟 1（會跑步驟 0），'
-                     '或確認 reduce.clean_out 設定。' % clean)
+        clean, _sfx, _lbl = colleague_source(cfg)
+        if not os.path.exists(clean):
+            sys.exit('colleague.copy_clean_to 已設定，但找不到要餵給同事的'
+                     '%s：%s\n   請先執行步驟 1（會跑步驟 0）。'
+                     % (_lbl, clean))
         dst = at_cwd(dst_rel)
         # 防止覆蓋同事的原始資料。最危險的情況是把 copy_clean_to 指到
         # 他原本那份檔案 —— 那會在他不知情的情況下改掉他的輸入。
@@ -831,29 +868,33 @@ def step2_colleague(cfg):
                      '   並把 colleague.train_dataset 設為該名稱。'
                      % (ds, ds))
         if os.path.abspath(dst) == os.path.abspath(clean):
-            # 同事的程式本來就讀清理檔所在的目錄 —— 不需要複製
-            print('同事的資料路徑就是清理檔本身，無需複製：%s' % clean)
+            # 同事的程式本來就讀那個檔所在的目錄 —— 不需要複製
+            print('同事的資料路徑就是該檔本身，無需複製：%s' % clean)
         else:
             d = os.path.dirname(dst)
             if d and not os.path.isdir(d):
                 os.makedirs(d)
             shutil.copyfile(clean, dst)
-            print('已複製無缺值檔 → %s' % dst)
+            print('已複製%s → %s' % (_lbl, dst))
 
     ds_use = colleague_ds(cfg)
     if ds_use != ds:
-        why = ('colleague.train_dataset 指定'
-               if (cc.get('train_dataset', '') or '')
-               else 'colleague.dataset_suffix="%s"'
-                    % (cc.get('dataset_suffix', '') or ''))
+        if cc.get('train_dataset', '') or '':
+            why = 'colleague.train_dataset 指定'
+        elif cc.get('dataset_suffix', None):
+            why = 'colleague.dataset_suffix="%s"' % cc['dataset_suffix']
+        else:
+            why = '由 colleague.source="%s" 推導' % (
+                (cc.get('source', '') or 'reduced').lower())
         print('餵給同事的資料集名稱：%s（%s；原為 %s）' % (ds_use, why, ds))
     cmd += ['--train_dataset', ds_use]
     ca = cc.get('csv_arg', '')
     if ca:
-        clean = cfg.get('_clean_csv', '')
+        clean = colleague_source(cfg)[0]
         if clean and os.path.exists(clean):
             cmd += [ca, os.path.abspath(clean)]
-            print('以 %s 指定無缺值檔：%s' % (ca, clean))
+            print('以 %s 指定%s：%s'
+                  % (ca, colleague_source(cfg)[2], clean))
         else:
             print('⚠️ colleague.csv_arg 已設定，但找不到步驟 0a 的輸出，'
                   '同事的 pipeline 將讀它自己的資料（可能含缺值）。')
