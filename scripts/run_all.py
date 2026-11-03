@@ -64,9 +64,9 @@ TEMPLATE = {
         "max_params": 300,
         "mem_budget_gb": 2.0,
         "train_na_frac": 0.0,
-        "clean_out": "data/clean/{train_dataset}_clean.csv",
+        "clean_out": "",
         "candidates": "",
-        "out": "data/reduced/{train_dataset}_reduced.csv",
+        "out": "",
         "script": "scripts/reduce_params.py"
     },
 
@@ -349,8 +349,7 @@ def step0_prepare(cfg):
     # ---- 0a 無缺值、保留全部參數 ----
     print('')
     print('--- 0a 清除缺值（保留全部參數，供步驟 2 與步驟 0b 使用）---')
-    clean = subst(rc.get('clean_out', 'data/clean/{train_dataset}_clean.csv'),
-                  cfg['train_dataset'])
+    clean = derived_path(cfg, 'clean_out', '_clean')
     _run_reduce(cfg, src, clean, n_param, na_thr, '', '0a')
 
     # ---- 0b 由 0a 的輸出再縮減給訓練 ----
@@ -366,8 +365,7 @@ def step0_prepare(cfg):
               % (n_clean, topk))
         return clean, clean
     # 0a 已清乾淨，這一步不必再設缺值門檻
-    train = subst(rc.get('out', 'data/reduced/{train_dataset}_reduced.csv'),
-                  cfg['train_dataset'])
+    train = derived_path(cfg, 'out', '_reduced')
     # 候選清單：reduce.candidates 未指定時，自動沿用同事上一輪的輸出。
     # 候選集由步驟 2 產生，第一輪跑 0b 時還不存在，所以第一輪沒有可釘的
     # 候選；第二輪起就有了，釘住它們可讓「候選不在圖裡」的落差歸零，
@@ -594,6 +592,29 @@ def step1_train(cfg, train_csv=None):
 # 步驟 2：執行同事的 pipeline
 # =====================================================================
 
+def derived_path(cfg, key, suffix):
+    """決定衍生檔（清理檔／縮減檔）的路徑。
+
+    設定值為空時，放在 data.csv 的**同一個目錄**，檔名是原檔名加後綴：
+        data/raw/semiconductor/case2.csv
+          → data/raw/semiconductor/case2_clean.csv
+          → data/raw/semiconductor/case2_reduced.csv
+    這樣衍生檔和原始資料放在一起，不會散到另一個 data/clean/ 目錄去。
+    設定值非空時以它為準（仍支援 {train_dataset} 佔位符）。
+    """
+    rc = cfg.get('reduce', {}) or {}
+    v = (rc.get(key, '') or '').strip()
+    if v:
+        return subst(v, cfg['train_dataset'])
+    src = cfg['data']['csv']
+    d = os.path.dirname(src)
+    stem, ext = os.path.splitext(os.path.basename(src))
+    out = os.path.join(d, stem + suffix + (ext or '.csv'))
+    if os.path.abspath(out) == os.path.abspath(src):
+        sys.exit('衍生檔路徑與原始資料相同（%s），拒絕覆寫。' % src)
+    return out
+
+
 def colleague_ds(cfg):
     """同事的 pipeline 實際被呼叫時用的資料集名稱。
 
@@ -789,11 +810,15 @@ def step2_colleague(cfg):
                      '資料。請改用別的名稱（例如 %s_clean），\n'
                      '   並把 colleague.train_dataset 設為該名稱。'
                      % (ds, ds))
-        d = os.path.dirname(dst)
-        if d and not os.path.isdir(d):
-            os.makedirs(d)
-        shutil.copyfile(clean, dst)
-        print('已複製無缺值檔 → %s' % dst)
+        if os.path.abspath(dst) == os.path.abspath(clean):
+            # 同事的程式本來就讀清理檔所在的目錄 —— 不需要複製
+            print('同事的資料路徑就是清理檔本身，無需複製：%s' % clean)
+        else:
+            d = os.path.dirname(dst)
+            if d and not os.path.isdir(d):
+                os.makedirs(d)
+            shutil.copyfile(clean, dst)
+            print('已複製無缺值檔 → %s' % dst)
 
     ds_use = colleague_ds(cfg)
     if ds_use != ds:
@@ -969,9 +994,7 @@ def main():
 
     # 0a 的輸出路徑先備好 —— --from-step 2 時步驟 0 不會跑，但步驟 2
     # 仍需要指向上一輪產生的無缺值檔
-    cfg['_clean_csv'] = subst(
-        cfg.get('reduce', {}).get('clean_out', 'data/clean/{train_dataset}_clean.csv'),
-        ds)
+    cfg['_clean_csv'] = derived_path(cfg, 'clean_out', '_clean')
 
     if lo <= 1 <= hi:
         # 0a 的輸出（無缺值、全參數）步驟 2 也要用，所以步驟 0 不能
