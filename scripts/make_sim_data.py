@@ -210,7 +210,7 @@ def main():
     A1 = random_lagged(n_sig, args.lag_degree / max(n_sig, 1), rng)
     I_B_inv = np.linalg.inv(np.eye(n_sig) - B)
     A1, rho0 = stabilize(A1, I_B_inv)
-    print('    同期邊 %d（平均出度 %.2f），滯後邊 %d（含自回歸 %d）'
+    print('    同期邊 %d（平均入度 %.2f），滯後邊 %d（含自回歸 %d）'
           % (int((B != 0).sum()), (B != 0).sum() / max(n_sig, 1),
              int((A1 != 0).sum()), n_sig))
     # (I-B)^-1 的放大倍率。B 在拓樸序下嚴格下三角故為幂零，級數有限，

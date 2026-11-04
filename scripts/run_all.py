@@ -74,7 +74,27 @@ TEMPLATE = {
     },
 
     "mtngc": {
-        "task": "task2b",
+        # task2a（同期，不含自身）。以模擬資料量測（N=20、1000 筆、真實
+        # 因果圖已知、同期與滯後邊各 2 平均入度、n_seed=10）：
+        #
+        #   seed 間 Jaccard   task2a 0.748　task2b 0.680　task1 0.506
+        #                     （task1 的最低值 0.404，已在本程式自己的
+        #                       「Jaccard < 0.5 圖不穩定」警告線上）
+        #   同期邊 F1(k=2)    task2a 0.405　task2b 0.329　task1 0.203
+        #   滯後邊 F1(k=2)    task1  0.423　task2b 0.225　task2a 0.113
+        #
+        # 每個 task 只還原自己模型得到的那種邊，這點如預期。選 task2a 的
+        # 理由是穩定度（這裡的首要需求）加上它還原的是同期邊 —— 對一列
+        # 一片 wafer 的 FD 資料，物理機制本來就多在同一道製程之內。
+        #
+        # 不選 task1 的額外理由出在資料本身：case2 有 97.2% 的組內時間
+        # 間隔超過 2 小時（重工），lag-1 跨越不等間距時「上一期」的意義
+        # 不固定；而前向填補會製造 lag-1 自相關 ≈ 缺失比例（實測 2%→
+        # 0.030、8%→0.090、20%→0.231），剛好注入 task1 要找的訊號。
+        #
+        # 要兩種邊都看就用 task2b（union F1 最高，k=3 時 0.500），代價是
+        # 穩定度與單一邊型的還原力都居中。
+        "task": "task2a",
         "lookback": 3,
         "hidden_dim": 64,
         "lambda_sparse": 0.1,
@@ -251,14 +271,27 @@ def block_subsample(arr, frac, n_blocks, rng):
 
 
 def top_edges(W, k):
-    """每個節點取最強的 k 條入邊，回傳布林矩陣。"""
+    """每個節點取最強的 k 條入邊，回傳布林矩陣。
+
+    兩個細節不是講究而是必要：
+
+    只取非零者。argsort 是對整列排序，所以一列的非零元素不足 k 個時，
+    剩下的名額會由零值欄位補上 —— 那不是「訊號比較弱的邊」而是「完全
+    沒有訊號」，而且挑中誰由欄索引決定。實測 N=20、k=3 時 task2a 有
+    8/60 條邊是這樣憑空生出來的（13%）。
+
+    kind='stable'。預設的 quicksort 不穩定，同分者的先後連在同一版
+    numpy 上都不保證一致。這裡的 W 常常大量同分（見 binarize 的說明），
+    所以要讓順序至少是確定的。
+    """
     W = np.abs(np.asarray(W, dtype=float)).copy()
     np.fill_diagonal(W, 0.0)
     n = W.shape[0]
     A = np.zeros((n, n), dtype=bool)
     for i in range(n):
-        if W[i].max() > 0:
-            A[i, np.argsort(-W[i])[:k]] = True
+        nz = np.flatnonzero(W[i] > 0)
+        if len(nz):
+            A[i, nz[np.argsort(-W[i][nz], kind='stable')[:k]]] = True
     np.fill_diagonal(A, False)
     return A
 
@@ -487,10 +520,15 @@ def step1_train(cfg, train_csv=None):
         sd = mc['seed'] + r * 97
         np.random.seed(sd)
         torch.manual_seed(sd)
+        # tasks= 只建需要的那一個 task。不給的話 3N 個 predictor 全部
+        # 建好並訓練，而下一行只讀 mc['task'] 的圖 —— 三分之二的訓練時間
+        # 丟掉。實測 N=20：22 秒/seed → 7 秒/seed。n_seed=20、N=300 時這
+        # 是步驟 1 的主要成本。
         m = MTNeuralGrangerMethod(
             lookback=mc['lookback'], hidden_dim=mc['hidden_dim'],
             lambda_sparse=mc['lambda_sparse'], max_epochs=mc['max_epochs'],
-            patience=mc['patience'], output_graph=mc['task'], verbose=False)
+            patience=mc['patience'], output_graph=mc['task'],
+            tasks=(mc['task'],), verbose=False)
         m.fit(data, segment_lengths=seg)
         Wr = np.abs(m.model.get_graph(mc['task']).astype(float))
         if stab:

@@ -247,22 +247,41 @@ def calibrate_threshold(X, y, n_perm, seed):
 def binarize(W, k, min_conc=0.0, min_edge=0.0, stats=None):
     """每個節點取最強的 k 條入邊；低於 min_edge 的邊不算。
 
-    min_edge 是這裡最要緊的參數，而原本沒有 —— 原本無條件取每列前 k
-    名。stability 模式下 W 的值就是「邊的出現頻率」，於是 k 從 1 改成 2
-    時，第二條邊常常是「n_seed 次裡只出現 1 次」的邊，而 np.argsort 對
-    同分者按欄索引排序：一條雜訊邊以任意的順序進入分組，下游結論跟著
-    翻。stability selection 的做法是按出現頻率設門檻（文獻上常取
-    0.6~0.8），而不是按排名取固定條數。
+    這裡真正造成不穩定的是**同分**，不是弱邊。以模擬資料量測（N=20、
+    真實因果圖已知、n_seed=10）：
+
+      W 是對每個 seed 的 top-k 二值遮罩取平均，所以值被量化成 1/n_seed
+      的倍數，而且大量飽和在 1.0（task2a：20 列裡有 25 個非對角格是
+      1.0）。於是「該列最大值有同分」的列佔了將近一半 —— task1 4/20、
+      task2a 8/20、task2b 9/20。那些列在 k=1 之下取誰，完全由 np.argsort
+      的欄索引順序決定。
+
+      隨機重排欄位再選一次、對回原標號，與原選擇的 Jaccard：
+        k=1  task1 0.815  task2a 0.660  task2b 0.630
+        k=2  task1 0.909  task2a 1.000  task2b 0.969
+      也就是 k=1 的邊集合有多達 37% 是欄位順序決定的。注意方向：k=2 比
+      k=1 更穩，所以把 edge_k 從 2 降到 1 會讓圖更隨意而不是更穩定。
+
+    同分的一整組一起收，就把這個依賴完全消掉（上述兩個 k 都變成 1.000）。
+    這是本函式最重要的一處修正。
+
+    min_edge 則是另一回事，不要高估它：它讓結果對 k 比較不敏感，但**消
+    不掉** k 的影響（量測到 t=0.8 時 k=1 與 k=2 的 Jaccard 是 0.92 /
+    0.85 / 0.86，始終不到 1.0），因為門檻只縮小候選池，不會取消 k 這個
+    上限。它的用處是把低頻率的邊擋在分組之外：t=0.5~0.6 對 task2b 幾乎
+    免費（union F1 .385 → .393），t=0.8 就開始明顯損失 recall
+    （task2b .309 → .235）。
 
     門檻在前、k 在後：k 只是上限。過了門檻卻超出 k 的邊都是真的穩定邊，
     不是硬湊出來的。
 
-    同分處理：第 k 與第 k+1 名的值相同時，取誰取決於欄位順序。這裡把同
-    分的一整組都收進來 —— 它們都已過門檻，都站得住腳 —— 結果因此與欄位
-    順序無關。
+    另外，原本的寫法會用零值欄位補滿 k（argsort 對整列排序），那不是弱
+    邊而是沒有訊號。實測在 k=1、k=2 不會發生（每列至少有 2 個非零），
+    k=3 則 task2a 有 8/60 條是這樣來的。這裡只取非零者。
 
     集中度 = 該列最大權重 / 該列權重總和，尺度無關，可跨列比較。
-    外生節點的權重分散，集中度接近 1/(n-1)。
+    外生節點的權重分散，集中度接近 1/(n-1)。min_conc 預設 0 時這個
+    判斷是關閉的（任何非零列都過），要用必須明確給一個正值。
 
     stats 給一個 dict 就會填入診斷數字（n_root 無入邊的節點數、n_tie 因
     同分而超出 k 的列數、n_cut 被 min_edge 擋掉的邊數）。
@@ -298,6 +317,28 @@ def binarize(W, k, min_conc=0.0, min_edge=0.0, stats=None):
     if stats is not None:
         stats.update(n_root=n_root, n_tie=n_tie, n_cut=n_cut)
     return A, W
+
+
+def order_robustness(W, k, min_conc=0.0, min_edge=0.0, n_perm=50, seed=0):
+    """隨機重排欄位、重選、對回原標號，量「這張鄰接矩陣有多少是欄位順序
+    決定的」。回傳平均 Jaccard，1.0 表示與欄位順序無關。
+
+    這是比「k 與 k±1 的 Jaccard」有意義得多的診斷。後者在無門檻的 top-k
+    之下是恆等式：k=1 的選擇必然是 k=2 選擇的子集，所以 Jaccard 恆等於
+    n_k1/n_k2 ≈ k1/k2 = 0.5 —— 不論矩陣內容是什麼。純雜訊和完美還原都會
+    讀到 0.5，那個數字不帶任何資訊。重排欄位則直接問到要問的事。
+    """
+    rng = np.random.RandomState(seed)
+    n = W.shape[0]
+    base = set(zip(*np.nonzero(binarize(W, k, min_conc, min_edge)[0])))
+    js = []
+    for _ in range(n_perm):
+        p = rng.permutation(n)
+        Ap = binarize(W[np.ix_(p, p)], k, min_conc, min_edge)[0]
+        back = set((int(p[i]), int(p[j])) for i, j in zip(*np.nonzero(Ap)))
+        un = len(base | back)
+        js.append(len(base & back) / float(un) if un else 1.0)
+    return float(np.mean(js)) if js else 1.0
 
 
 def break_cycles(A, W):
@@ -1356,19 +1397,11 @@ def main():
             bstat = {}
             A, Wa = binarize(W, gc['edge_k'], gc['min_concentration'],
                              min_edge, bstat)
-            # edge_k 敏感度：換一個 k，分組會不會變。會變就直接說，不要讓
-            # 一個旋鈕悄悄決定結論 —— 使用者實際遇到的就是 k=1 與 k=2 的
-            # 結論完全不同，而輸出裡看不出那是旋鈕造成的。
-            sens = []
-            for k2 in (gc['edge_k'] - 1, gc['edge_k'] + 1):
-                if k2 < 1:
-                    continue
-                A2, _ = binarize(W, k2, gc['min_concentration'], min_edge)
-                e1 = set(zip(*np.nonzero(A)))
-                e2 = set(zip(*np.nonzero(A2)))
-                un = len(e1 | e2)
-                sens.append((k2, len(e2),
-                             len(e1 & e2) / float(un) if un else 1.0))
+            # 報「欄位順序決定了多少」而不是「k 改了差多少」。後者在無門檻
+            # 的 top-k 之下是恆等式（k=1 必為 k=2 的子集 → Jaccard 恆為
+            # k1/k2），純雜訊也會讀到 0.5，不帶資訊。
+            rob = order_robustness(W, gc['edge_k'],
+                                   gc['min_concentration'], min_edge)
             if bstat.get('n_cut'):
                 emit('  邊門檻擋掉 %d 條邊；%d 個節點因此無入邊（視為源頭）'
                      % (bstat['n_cut'], bstat['n_root']))
@@ -1376,17 +1409,13 @@ def main():
                 emit('  %d 列在第 %d／%d 名同分，同分的一組全收'
                      '（否則取誰取決於欄位順序）'
                      % (bstat['n_tie'], gc['edge_k'], gc['edge_k'] + 1))
-            if sens:
-                emit('  edge_k 敏感度（目前 %d，%d 條邊）：'
-                     % (gc['edge_k'], int(A.sum())))
-                for k2, n2, jac in sens:
-                    emit('    k=%d → %d 條邊，與目前的 Jaccard %.2f%s'
-                         % (k2, n2, jac,
-                            '　⚠️ 結論可能不同' if jac < 0.8 else ''))
-                if min(j for _k, _n, j in sens) < 0.8:
-                    emit('    圖對 edge_k 敏感 —— 報告裡要寫明用的是'
-                         ' k=%d，或提高 min_edge 讓弱邊不進分組。'
-                         % gc['edge_k'])
+            emit('  鄰接矩陣 %d 條邊（edge_k=%d）；'
+                 '欄序穩健度 %.2f' % (int(A.sum()), gc['edge_k'], rob))
+            if rob < 0.99:
+                emit('    ⚠️ 有 %.0f%% 的邊是欄位順序決定的 —— '
+                     '同分的邊比 edge_k 容得下的多。' % (100 * (1 - rob)))
+                emit('       提高 edge_k 或 mtngc.n_seed（降低同分）。'
+                     '降低 edge_k 會更糟，不要往那個方向調。')
             A = break_cycles(A, Wa)
             pri = {c: k for k, c in enumerate(cand)}
             groups, _rel = group_candidates(A, cand, pri, gc['max_hop'])
