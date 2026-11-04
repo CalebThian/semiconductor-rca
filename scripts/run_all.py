@@ -455,6 +455,9 @@ def step1_train(cfg, train_csv=None):
         import torch
         from src.models.mt_ngc_method import MTNeuralGrangerMethod
         from scripts.residual_anomaly import split_by_symbol
+        import inspect
+        _supports_tasks = 'tasks' in inspect.signature(
+            MTNeuralGrangerMethod.__init__).parameters
     except ImportError as e:
         sys.exit('步驟 1 需要 torch 與專案模組（src/、scripts/），'
                  '但匯入失敗：%s\n'
@@ -522,13 +525,25 @@ def step1_train(cfg, train_csv=None):
         torch.manual_seed(sd)
         # tasks= 只建需要的那一個 task。不給的話 3N 個 predictor 全部
         # 建好並訓練，而下一行只讀 mc['task'] 的圖 —— 三分之二的訓練時間
-        # 丟掉。實測 N=20：22 秒/seed → 7 秒/seed。n_seed=20、N=300 時這
-        # 是步驟 1 的主要成本。
-        m = MTNeuralGrangerMethod(
+        # 丟掉。實測 N=12：2.9 秒 → 0.7 秒，圖完全相同。n_seed=20、N=300
+        # 時這是步驟 1 的主要成本。
+        #
+        # 用 signature 偵測而不是直接傳。這個參數是後來加到
+        # mt_ngc_method.py 的，而整合版的 src/models/ 可能還是舊版 ——
+        # 直接傳就會是 TypeError: unexpected keyword argument 'tasks'。
+        # 支援就用，不支援就照舊跑，只是慢三倍。
+        kw = dict(
             lookback=mc['lookback'], hidden_dim=mc['hidden_dim'],
             lambda_sparse=mc['lambda_sparse'], max_epochs=mc['max_epochs'],
-            patience=mc['patience'], output_graph=mc['task'],
-            tasks=(mc['task'],), verbose=False)
+            patience=mc['patience'], output_graph=mc['task'], verbose=False)
+        if _supports_tasks:
+            kw['tasks'] = (mc['task'],)
+        elif r == 0:
+            print('  註：src/models/mt_ngc_method.py 不支援 tasks 參數，'
+                  '會訓練全部 3 個 task 卻只用 1 個（慢約 3 倍）。')
+            print('      把 tasks 參數搬進 mt_ngc_method.py 與 '
+                  'mt_neural_granger.py 即可。')
+        m = MTNeuralGrangerMethod(**kw)
         m.fit(data, segment_lengths=seg)
         Wr = np.abs(m.model.get_graph(mc['task']).astype(float))
         if stab:
