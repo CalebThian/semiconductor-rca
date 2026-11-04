@@ -730,6 +730,17 @@ def main():
         print(s)
         L.append(s)
 
+    def warn(s=''):
+        """一律輸出，brief 模式也不抑制。
+
+        brief 是為了不印步驟 1-5 的細節，但缺值處理的診斷是使用者必須
+        據以做決定的東西。被抑制之後，中止時畫面上只剩最後那一行「丟列
+        損失超過 max_row_loss」—— 看不到是哪些欄位造成、也看不到三個
+        選項，於是訊息等於只說了「不行」而沒說「為什麼」和「怎麼辦」。
+        """
+        print(s)
+        L.append(s)
+
     if cfg['output'].get('brief', False):
         _on[0] = False
 
@@ -809,21 +820,28 @@ def main():
     n_before = len(raw)
     n_na_cell = int(raw[sensor_cols].isna().sum().sum())
     if n_na_cell == 0:
-        emit('  NA 檢查：參數欄位無缺值')
+        warn('  NA 檢查：參數欄位無缺值')
     elif na_mode == 'none':
-        emit('  NA 檢查：共 %d 個缺值（dropna=none，不處理；'
+        warn('  NA 檢查：共 %d 個缺值（dropna=none，不處理；'
              '聚合時會自動略過）' % n_na_cell)
     else:
         na_frac = raw[sensor_cols].isna().mean()
-        emit('  NA 檢查：共 %d 個缺值，分布於 %d / %d 個參數'
+        warn('  NA 檢查：共 %d 個缺值，分布於 %d / %d 個參數'
              % (n_na_cell, int((na_frac > 0).sum()), len(sensor_cols)))
+        # 把實際生效的值印出來。中止訊息叫人去改這三個設定，但若設定沒
+        # 傳到（改了 run_all 產生的 config、或 run_all 沒把鍵轉下來），
+        # 改完重跑會停在一模一樣的地方，而畫面上看不出是哪一種。
+        warn('    生效設定：dropna=%s　drop_col_na_frac=%.2f　'
+             'max_row_loss=%.2f'
+             % (na_mode, float(dc.get('drop_col_na_frac', 0.5)),
+                float(dc.get('max_row_loss', 0.3))))
 
         # 缺值比例過高的參數：丟列會把資料砍光，改為丟棄該參數
         thr = float(dc.get('drop_col_na_frac', 0.5))
         if thr > 0:
             bad = [c for c in sensor_cols if na_frac[c] > thr]
             if bad:
-                emit('    %d 個參數缺值超過 %.0f%%，改丟參數而非丟列：%s'
+                warn('    %d 個參數缺值超過 %.0f%%，改丟參數而非丟列：%s'
                      % (len(bad), 100 * thr,
                         ', '.join('%s(%.0f%%)' % (c, 100 * na_frac[c])
                                   for c in bad[:6])
@@ -844,22 +862,62 @@ def main():
         if n_drop and surv < 1.0 - max_loss:
             na_frac2 = raw[sensor_cols].isna().mean()
             culprits = na_frac2[na_frac2 > 0].sort_values(ascending=False)
-            emit('  ❌ 丟列會移除 %d / %d 列（%.1f%%），只剩 %d 列。'
+            warn('  ❌ 丟列會移除 %d / %d 列（%.1f%%），只剩 %d 列。'
                  % (n_drop, n_before, 100.0 * n_drop / max(n_before, 1),
                     n_before - n_drop))
-            emit('     原因不是單一欄位嚴重，而是 %d 個欄位各有少量缺值，'
-                 % int((na_frac2 > 0).sum()))
-            emit('     「整列無缺值」的機率是各欄存活率的乘積。')
-            emit('     缺值最多的幾個欄位：')
+            # 兩種型態的處置完全不同，所以診斷要分開講，不能一律說成
+            # 「許多欄位各缺一點」—— 五欄各缺 35% 也會把列砍光，但那種
+            # 情況丟欄就解決了。以缺值最高的那一欄區分。
+            n_bad = int((na_frac2 > 0).sum())
+            worst = float(culprits.iloc[0]) if len(culprits) else 0.0
+            if worst >= 0.15:
+                warn('     原因是 %d 個欄位缺值偏高（最高 %.0f%%），'
+                     '而丟列的條件是「整列都沒有缺值」。'
+                     % (n_bad, 100.0 * worst))
+            else:
+                warn('     原因不是單一欄位嚴重 —— 最高也只缺 %.0f%% ——'
+                     '，而是 %d 個欄位各缺一點，' % (100.0 * worst, n_bad))
+            warn('     「整列無缺值」的機率是各欄存活率的乘積。')
+            warn('     缺值最多的幾個欄位：')
             for c, v in culprits.head(8).items():
-                emit('       %-28s %5.1f%%' % (str(c)[:28], 100.0 * v))
-            emit('')
-            emit('     三個選項：')
-            emit('       1. 調低 data.drop_col_na_frac（目前 %.2f），'
+                warn('       %-28s %5.1f%%' % (str(c)[:28], 100.0 * v))
+            # 把「丟欄換回幾列」算成實數，而不是讓人去試。缺值分散在許多
+            # 欄位時，丟欄其實救不了：門檻必須低到幾乎丟掉全部欄位，列才
+            # 回得來。這張表會直接顯示那件事，省掉逐一試門檻的來回。
+            warn('')
+            warn('     若改以丟欄為主，各門檻實際換回多少列：')
+            lab_c = dc['label_col']
+            shown, best = set(), (0.0, None)
+            for t in (0.30, 0.20, 0.10, 0.05, 0.02, 0.01, 0.0):
+                cols = [c for c in sensor_cols if na_frac2[c] <= t]
+                if len(cols) in shown:
+                    continue
+                shown.add(len(cols))
+                if not cols:
+                    warn('       %.2f → 留 0 個參數（門檻以下沒有欄位）'
+                         % t)
+                    continue
+                k = int(raw[cols + [lab_c]].notna().all(axis=1).sum())
+                warn('       %.2f → 留 %d / %d 參數，剩 %d / %d 列（%.0f%%）'
+                     % (t, len(cols), len(sensor_cols), k, n_before,
+                        100.0 * k / max(n_before, 1)))
+                r = k / float(max(n_before, 1))
+                if r > best[0]:
+                    best = (r, (t, len(cols)))
+            if best[1] is None or best[0] < 1.0 - max_loss:
+                warn('     → 丟欄救不了這份資料：缺值分散在太多欄位，'
+                     '門檻再低也換不回足夠的列。')
+                warn('       選項 1 是死路，用選項 2（dropna="none"）。')
+            else:
+                warn('     → 門檻 %.2f 可行：留 %d 個參數、%.0f%% 的列。'
+                     % (best[1][0], best[1][1], 100.0 * best[0]))
+            warn('')
+            warn('     三個選項：')
+            warn('       1. 調低 data.drop_col_na_frac（目前 %.2f），'
                  '改以丟欄為主' % thr)
-            emit('       2. data.dropna = "none"，保留缺值'
+            warn('       2. data.dropna = "none"，保留缺值'
                  '（聚合時自動略過，但各 wafer 的平均用的點數不同）')
-            emit('       3. 調高 data.max_row_loss（目前 %.2f），'
+            warn('       3. 調高 data.max_row_loss（目前 %.2f），'
                  '明確接受這個損失' % max_loss)
             sys.exit('丟列損失超過 max_row_loss，已中止以免在殘餘資料上'
                      '產生看似正常但無意義的結果。')
@@ -868,18 +926,18 @@ def main():
             lab_b = raw[dc['label_col']].astype(str).value_counts()
             raw = raw[keep].reset_index(drop=True)
             lab_a = raw[dc['label_col']].astype(str).value_counts()
-            emit('    丟棄含缺值的列：%d / %d（%.1f%%），剩餘 %d 列'
+            warn('    丟棄含缺值的列：%d / %d（%.1f%%），剩餘 %d 列'
                  % (n_drop, n_before, 100.0 * n_drop / max(n_before, 1),
                     len(raw)))
             for k in lab_b.index:
                 b, a = int(lab_b[k]), int(lab_a.get(k, 0))
-                emit('      %-12s %d → %d（丟棄 %.1f%%）'
+                warn('      %-12s %d → %d（丟棄 %.1f%%）'
                      % (k, b, a, 100.0 * (b - a) / max(b, 1)))
             av = str(dc['abnormal_value'])
             r_ab = (lab_b.get(av, 0) - lab_a.get(av, 0)) / max(lab_b.get(av, 1), 1)
             r_all = n_drop / max(n_before, 1)
             if r_ab > max(2 * r_all, r_all + 0.1):
-                emit('      ⚠️ 異常批被丟棄的比例明顯高於整體 —— '
+                warn('      ⚠️ 異常批被丟棄的比例明顯高於整體 —— '
                      '缺值可能與異常相關，丟列會系統性地移除訊號。')
             if len(raw) == 0:
                 sys.exit('丟棄缺值後沒有資料剩下。請改用 dropna=none，'

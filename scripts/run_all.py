@@ -1048,6 +1048,20 @@ def step3_analysis(cfg, graph_path, cand_csv):
         "seed": cfg.get('seed', 0)
     }
     cpath = subst(ac['config_out'], ds)
+    # analysis.config_out 是「產生」的檔，每跑一次步驟 3 就整個覆寫。
+    # 它若跟 --config 指向同一個檔，使用者對設定的每一次修改都會在下一
+    # 次執行時被抹掉 —— 而症狀只是「改了沒有用」，看不出檔案被改回去。
+    own = cfg.get('_config_path', '')
+    if own and os.path.abspath(cpath) == os.path.abspath(own):
+        sys.exit('analysis.config_out 與 --config 是同一個檔（%s）。\n'
+                 '   這個檔由步驟 3 產生並覆寫，你對它做的修改會被抹掉。\n'
+                 '   請把 analysis.config_out 改成別的名字，例如\n'
+                 '     "config_out": "config/{train_dataset}_pipeline.json"'
+                 % cpath)
+    print('缺值設定（轉給分析流程）：dropna=%s　drop_col_na_frac=%s　'
+          'max_row_loss=%s'
+          % (sub['data']['dropna'], sub['data']['drop_col_na_frac'],
+             sub['data']['max_row_loss']))
     ensure_dir(cpath)
     with open(cpath, 'w', encoding='utf-8') as f:
         json.dump(sub, f, ensure_ascii=False, indent=2)
@@ -1117,6 +1131,7 @@ def main():
     if not os.path.exists(args.config):
         sys.exit('找不到設定檔：%s' % args.config)
     cfg = load_config(args.config)
+    cfg['_config_path'] = args.config
     ds = cfg['train_dataset']
 
     lo = args.only or args.from_step
