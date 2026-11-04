@@ -152,6 +152,10 @@ def parse_args():
     p.add_argument('--hidden', type=int, default=None,
                    help='只用於記憶體估計，預設取 config 的 mtngc.hidden_dim')
     p.add_argument('--out', default=None)
+    p.add_argument('--out-encoding', default='utf-8',
+                   help='輸出 csv 的編碼。預設 utf-8（不含 BOM）。'
+                        '要在 Excel 直接開且欄名含中文時用 utf-8-sig，'
+                        '但下游若以 pandas 預設編碼讀，第一個欄名會多一個 BOM。')
     p.add_argument('--dry-run', action='store_true')
     return p.parse_args()
 
@@ -500,7 +504,14 @@ def main():
         meta = [c for c in raw.columns if c in set(meta)]  # 保持原欄序
         keep_set = set(keep)
         out_cols = [c for c in raw.columns if c in set(meta) or c in keep_set]
-        raw[out_cols].to_csv(out_csv, index=False, encoding='utf-8-sig')
+        # 不寫 BOM。這個檔的主要讀者是同事的 pipeline，而 pandas 的
+        # read_csv 預設是 utf-8，不會吃掉 BOM —— 第一個欄名就會變成
+        # "﻿LOT_ID"，於中繼欄位比對時對不上，LOT_ID 於是被當成一個
+        # 感測器參數（實測：12 個參數的檔被數成 13 個）。我們自己的
+        # read_csv_any 以 utf-8-sig 開頭所以兩種都讀得動，問題只出在對方。
+        # 要在 Excel 直接開且欄名含中文時，用 --out-encoding utf-8-sig。
+        raw[out_cols].to_csv(out_csv, index=False,
+                             encoding=args.out_encoding)
         with open(out_txt, 'w', encoding='utf-8') as f:
             f.write('\n'.join(map(str, keep)) + '\n')
         emit('    已存：%s（shape %s）'

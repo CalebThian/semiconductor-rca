@@ -97,7 +97,7 @@ TEMPLATE = {
     },
 
     "colleague": {
-        "cwd": "../fd_analysis/gnn-tam-main",
+        "cwd": "fd_analysis/gnn-tam-main",
         "script": "run_pipeline.py",
         "config": "pipeline_config.yaml",
         "python": "",
@@ -316,7 +316,15 @@ def step0_prepare(cfg):
                                       自己有 NA 處理
 
     0a 產出的無缺值全參數檔同時供步驟 2 使用（見 colleague 區塊的說明）。
+
+    每條返回路徑都把實際路徑記到 cfg['_clean_csv'] / cfg['_train_csv']，
+    步驟 2 才知道真正該餵哪個檔。推算路徑在走捷徑時會指到從沒寫出來的
+    檔案。
     """
+    def done(clean_, train_):
+        cfg['_clean_csv'], cfg['_train_csv'] = clean_, train_
+        return clean_, train_
+
     rc = cfg.get('reduce', {}) or {}
     dc = cfg['data']
     src = dc['csv']
@@ -324,7 +332,7 @@ def step0_prepare(cfg):
         sys.exit('找不到資料檔：%s' % src)
     if not rc.get('enabled', True):
         print('（reduce.enabled 為 false，步驟 0 整段略過）')
-        return src, (dc.get('train_csv') or src)
+        return done(src, (dc.get('train_csv') or src))
 
     banner(0, '訓練與候選集的資料前處理')
 
@@ -359,13 +367,13 @@ def step0_prepare(cfg):
     print('--- 0b 縮減參數（訓練用）---')
     if dc.get('train_csv'):
         print('（data.train_csv 已指定為 %s，略過 0b）' % dc['train_csv'])
-        return clean, dc['train_csv']
+        return done(clean, dc['train_csv'])
     ch = read_csv_any(clean, nrows=5)
     n_clean = len([c for c in ch.columns if c not in meta])
     if n_clean <= topk:
         print('清除缺值後只剩 %d 個參數，不超過 %d，直接用 0a 的輸出訓練。'
               % (n_clean, topk))
-        return clean, clean
+        return done(clean, clean)
     # 0a 已清乾淨，這一步不必再設缺值門檻
     train = derived_path(cfg, 'out', '_reduced')
     # 候選清單：reduce.candidates 未指定時，自動沿用同事上一輪的輸出。
@@ -398,7 +406,7 @@ def step0_prepare(cfg):
         print('  註：候選集因此只能從 Welch 選出的參數裡挑 —— '
               '覆蓋率落差消失，')
         print('      但候選集不再獨立於 Welch 排序，方法說明需據此調整。')
-    return clean, train
+    return done(clean, train)
 
 
 def step1_train(cfg, train_csv=None):
@@ -646,17 +654,33 @@ def colleague_source(cfg):
                       仍是獨立於 Welch 的第二個意見，代價是部分候選可能
                       不在圖裡（由 check_candidate_coverage 回報）。
       "original"      原始檔。他的程式不處理缺值時不要用。
+
+    步驟 0 有三條捷徑會「不產生縮減檔」就返回（reduce.enabled 為 false、
+    data.train_csv 已指定、清除缺值後參數已不超過上限），這時步驟 1 訓練
+    用的是別的檔，但 derived_path 算出來的 _reduced 路徑從沒被寫出來
+    —— 於是步驟 2 報「找不到 case2_reduced」。所以優先採用步驟 0 實際
+    記錄的路徑（cfg['_train_csv'] / cfg['_clean_csv']），只有在單獨跑
+    步驟 2（--only 2）而沒有那筆記錄時才回頭用推算的路徑。
     """
     cc = cfg.get('colleague', {}) or {}
     src = (cc.get('source', '') or 'reduced').lower()
     if src == 'reduced':
-        return derived_path(cfg, 'out', '_reduced'), '_reduced', '縮減檔'
-    if src == 'clean':
-        return derived_path(cfg, 'clean_out', '_clean'), '_clean', '無缺值檔'
-    if src == 'original':
+        p = cfg.get('_train_csv') or derived_path(cfg, 'out', '_reduced')
+    elif src == 'clean':
+        p = cfg.get('_clean_csv') or derived_path(cfg, 'clean_out', '_clean')
+    elif src == 'original':
         return cfg['data']['csv'], '', '原始檔'
-    sys.exit('colleague.source 只能是 reduced / clean / original，'
-             '收到 "%s"。' % src)
+    else:
+        sys.exit('colleague.source 只能是 reduced / clean / original，'
+                 '收到 "%s"。' % src)
+    # 說明文字按實際檔名給，不按 source 設定給 —— 捷徑路徑下 source 是
+    # "reduced" 而檔案其實是 _clean，印成「縮減檔」會把人引到錯的地方找。
+    stem = os.path.splitext(os.path.basename(p))[0]
+    orig = os.path.splitext(os.path.basename(cfg['data']['csv']))[0]
+    sfx = stem[len(orig):] if stem.startswith(orig) else ''
+    lbl = {'_reduced': '縮減檔', '_clean': '無缺值檔', '': '原始檔'}.get(
+        sfx, '衍生檔（%s）' % stem)
+    return p, sfx, lbl
 
 
 def colleague_ds(cfg):
@@ -666,8 +690,8 @@ def colleague_ds(cfg):
     無缺值檔，就得餵他一個不同的名稱。優先序：
 
       colleague.train_dataset  明確指定（完全覆寫）
-      colleague.dataset_suffix 在原名後加後綴，預設 "_clean"
-      兩者皆空                  用原名（他會讀自己原本那份，含缺值）
+      colleague.dataset_suffix 在原名後加後綴
+      兩者皆空                  用「實際要餵給他的那個檔的主幹」
 
     這個名稱必須同時用在三個地方，否則就會錯開：
       1. 傳給他的 --train_dataset
@@ -681,12 +705,14 @@ def colleague_ds(cfg):
     explicit = cc.get('train_dataset', '') or ''
     if explicit:
         return explicit
-    # dataset_suffix 未指定時由 colleague.source 推導，兩者才不會錯開
-    # （餵縮減檔卻叫 case2_clean 會誤導）
     sfx = cc.get('dataset_suffix', None)
-    if sfx is None or sfx == '':
-        sfx = colleague_source(cfg)[1]
-    return ds + sfx
+    if sfx:
+        return ds + sfx
+    # 未指定時直接用實際要餵給他的檔案主幹。推導後綴（"_reduced"）看似
+    # 等價，但步驟 0 走捷徑時餵出去的其實是 case2_clean.csv，名稱卻會變
+    # case2_reduced —— 名字和檔案錯開，他就讀不到。用檔名主幹則由構造
+    # 保證三處一致：--train_dataset、copy_clean_to、output_csv。
+    return os.path.splitext(os.path.basename(colleague_source(cfg)[0]))[0]
 
 
 def check_colleague_input(cfg, cand_csv):
@@ -860,9 +886,35 @@ def step2_colleague(cfg):
     if dst_rel:
         clean, _sfx, _lbl = colleague_source(cfg)
         if not os.path.exists(clean):
-            sys.exit('colleague.copy_clean_to 已設定，但找不到要餵給同事的'
-                     '%s：%s\n   請先執行步驟 1（會跑步驟 0）。'
-                     % (_lbl, clean))
+            # 單獨跑步驟 2 時 cfg['_train_csv'] 是空的，路徑只能推算，
+            # 而推算的 _reduced 檔在步驟 0 走捷徑的那幾種情況下根本沒被
+            # 寫出來。所以除了報路徑，還要說出同名的檔在哪裡。
+            stem = os.path.splitext(os.path.basename(clean))[0]
+            near = []
+            for root, _d, files in os.walk(os.path.dirname(
+                    os.path.abspath(cfg['data']['csv'])) or '.'):
+                for fn in files:
+                    if fn.startswith(os.path.splitext(os.path.basename(
+                            cfg['data']['csv']))[0]) and fn.endswith('.csv'):
+                        near.append(os.path.join(root, fn))
+            msg = ['colleague.copy_clean_to 已設定，但找不到要餵給同事的'
+                   '%s：%s' % (_lbl, clean)]
+            msg.append('   這個檔由步驟 0 產生，而步驟 0 只在執行步驟 1 '
+                       '時才會跑。')
+            if near:
+                msg.append('   同一個目錄下現有的檔：')
+                for f in sorted(set(near))[:8]:
+                    msg.append('     %s' % f)
+                msg.append('   若其中有 %s_clean.csv 而沒有 %s.csv，'
+                           '就是步驟 0 走了捷徑'
+                           % (cfg['train_dataset'], stem))
+                msg.append('   （清除缺值後參數已不超過上限，'
+                           '於是沒再做 0b 縮減）。')
+                msg.append('   把 colleague.source 改成 "clean"，'
+                           '或連步驟 1 一起跑（--from-step 1）。')
+            else:
+                msg.append('   請執行 --from-step 1。')
+            sys.exit('\n'.join(msg))
         dst = at_cwd(dst_rel)
         # 防止覆蓋同事的原始資料。最危險的情況是把 copy_clean_to 指到
         # 他原本那份檔案 —— 那會在他不知情的情況下改掉他的輸入。
@@ -886,6 +938,15 @@ def step2_colleague(cfg):
                 os.makedirs(d)
             shutil.copyfile(clean, dst)
             print('已複製%s → %s' % (_lbl, dst))
+        # BOM 檢查：我們的 read_csv_any 以 utf-8-sig 開頭所以讀得動，
+        # 但他若用 pandas 預設編碼，第一個欄名會變 "﻿LOT_ID"，
+        # 於是 LOT_ID 不被認作中繼欄位而被當成一個感測器參數。
+        with open(dst, 'rb') as f:
+            if f.read(3) == b'\xef\xbb\xbf':
+                print('⚠️ 餵給同事的檔開頭有 BOM。他若以 pandas 預設編碼'
+                      '讀，第一個欄名會是 "\\ufeffLOT_ID"，')
+                print('   LOT_ID 會被當成感測器參數（參數數目多 1）。'
+                      '請確認他讀檔時用 encoding="utf-8-sig"。')
 
     ds_use = colleague_ds(cfg)
     if ds_use != ds:
@@ -894,8 +955,7 @@ def step2_colleague(cfg):
         elif cc.get('dataset_suffix', None):
             why = 'colleague.dataset_suffix="%s"' % cc['dataset_suffix']
         else:
-            why = '由 colleague.source="%s" 推導' % (
-                (cc.get('source', '') or 'reduced').lower())
+            why = '取自實際餵給他的檔名'
         print('餵給同事的資料集名稱：%s（%s；原為 %s）' % (ds_use, why, ds))
     cmd += ['--train_dataset', ds_use]
     ca = cc.get('csv_arg', '')
