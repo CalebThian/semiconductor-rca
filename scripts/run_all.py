@@ -33,6 +33,7 @@ run_all.py  ——  三階段統籌：MT-NGC 訓練 → 同事 pipeline → 分�
 """
 
 import argparse
+import csv
 import json
 import os
 import re
@@ -587,10 +588,19 @@ def step1_train(cfg, train_csv=None):
     epath = subst(ec['out'], colleague_ds(cfg))
     ensure_dir(epath)
     fmt = '%%.%df' % ec.get('precision', 6)
+    # 用 csv.writer 而非手寫字串：參數名稱含逗號時（真實感測器名常帶
+    # 單位，例如 "Flow (sccm), Ar"）手寫會讓欄位錯位，讀回來的名稱變成
+    # 碎片，於是與資料集的交集為 0 —— 症狀是「edges 涵蓋 sensor 數為 0」。
+    # 引號處理交給標準庫。
+    n_comma = sum(1 for s_, d_, _w in rows if ',' in s_ or ',' in d_)
     with open(epath, 'w', encoding='utf-8', newline='') as f:
-        f.write('source,score,target\n')
+        w = csv.writer(f)
+        w.writerow(['source', 'score', 'target'])
         for s_, d_, w_ in rows:
-            f.write('%s,%s,%s\n' % (s_, fmt % w_, d_))
+            w.writerow([s_, fmt % w_, d_])
+    if n_comma:
+        print('  註：%d 條邊的參數名稱含逗號，已加引號。'
+              '若對方以手寫方式切欄（split(",")）會錯位。' % n_comma)
     print('邊清單已存：%s（%d 條邊，密度 %.3f）'
           % (epath, len(rows), len(rows) / float(max(n * (n - 1), 1))))
     print('方向：source 為因、target 為果%s'
