@@ -57,6 +57,7 @@ TEMPLATE = {
         "exclude": [],
         "dropna": "row",
         "drop_col_na_frac": 0.5,
+        "min_row_keep": 0.8,
         "max_row_loss": 0.3
     },
 
@@ -1024,7 +1025,8 @@ def step3_analysis(cfg, graph_path, cand_csv):
             "exclude": dc.get('exclude', []),
             "dropna": dc.get('dropna', 'row'),
             "drop_col_na_frac": dc.get('drop_col_na_frac', 0.5),
-            "max_row_loss": dc.get('max_row_loss', 0.3)
+            "max_row_loss": dc.get('max_row_loss', 0.3),
+            "min_row_keep": dc.get('min_row_keep', 0.8)
         },
         "candidates": {
             "file": cand_csv,
@@ -1062,6 +1064,8 @@ def step3_analysis(cfg, graph_path, cand_csv):
           'max_row_loss=%s'
           % (sub['data']['dropna'], sub['data']['drop_col_na_frac'],
              sub['data']['max_row_loss']))
+    print('  min_row_keep=%s（>0 時自動覆寫 drop_col_na_frac）'
+          % sub['data']['min_row_keep'])
     ensure_dir(cpath)
     with open(cpath, 'w', encoding='utf-8') as f:
         json.dump(sub, f, ensure_ascii=False, indent=2)

@@ -88,7 +88,8 @@ TEMPLATE = {
         "abnormal_value": "Abnormal",
         "exclude": [],
         "dropna": "row",
-        "drop_col_na_frac": 0.5
+        "drop_col_na_frac": 0.5,
+        "min_row_keep": 0.8
     },
     "candidates": {
         "file": "",
@@ -831,18 +832,95 @@ def main():
         # 把實際生效的值印出來。中止訊息叫人去改這三個設定，但若設定沒
         # 傳到（改了 run_all 產生的 config、或 run_all 沒把鍵轉下來），
         # 改完重跑會停在一模一樣的地方，而畫面上看不出是哪一種。
-        warn('    生效設定：dropna=%s　drop_col_na_frac=%.2f　'
+        _mrk = float(dc.get('min_row_keep', 0.0))
+        warn('    生效設定：dropna=%s　drop_col_na_frac=%s　'
              'max_row_loss=%.2f'
-             % (na_mode, float(dc.get('drop_col_na_frac', 0.5)),
+             % (na_mode,
+                ('自動（min_row_keep=%.2f）' % _mrk) if _mrk > 0
+                else '%.2f' % float(dc.get('drop_col_na_frac', 0.5)),
                 float(dc.get('max_row_loss', 0.3))))
 
-        # 缺值比例過高的參數：丟列會把資料砍光，改為丟棄該參數
+        # ---- 自動調門檻 ----
+        # data.min_row_keep 設了就改成求解：在「列存活率 ≥ 目標」的條件
+        # 下保留最多的參數。存活率對門檻單調不增（門檻高 → 留的欄多 →
+        # 能存活的列少），所以二分搜尋即可，不必逐一試門檻。
+        #
+        # 搜尋的候選只取資料中實際出現的缺值比例值。以欄數 k 搜尋會踩到
+        # 同分問題（邊界上數個欄位缺值比例相同，全留會讓存活率掉到目標
+        # 以下，全丟又浪費），而門檻的語意本來就是「≤ t 的全留」，所以
+        # 用門檻值搜尋既無同分問題，寫回設定檔也能重現同樣的結果。
+        #
+        # 注意這在門檻這個參數化之下是最佳的，但不是全域最佳：同樣的欄
+        # 數換一個子集可能留下更多列（取決於缺值位置的重疊）。設定檔只
+        # 給得出一個門檻，所以就在門檻的範圍內求最佳。
+        # thr 為 None 表示「不丟欄」。不能用 0 表示關閉 —— 自動搜尋
+        # 會合法地選出 0.0（只留完全無缺值的參數），若 0 仍當成關閉，
+        # 門檻算對了卻不會套用，丟列照樣把資料砍光。
         thr = float(dc.get('drop_col_na_frac', 0.5))
-        if thr > 0:
+        if thr <= 0:
+            thr = None
+        target = float(dc.get('min_row_keep', 0.0))
+        if target > 0 and n_na_cell:
+            if not 0.0 < target <= 1.0:
+                sys.exit('data.min_row_keep 必須在 0 與 1 之間，收到 %s。'
+                         % target)
+            lab_c = dc['label_col']
+
+            def _surv(t):
+                cols = [c for c in sensor_cols if na_frac[c] <= t]
+                if not cols:
+                    return 1.0, []
+                s = float(raw[cols + [lab_c]].notna().all(axis=1).mean())
+                return s, cols
+
+            levels = sorted(set(float(v) for v in na_frac.values))
+            s_all, _c = _surv(levels[-1])
+            warn('    自動調門檻：目標保留 %.0f%% 的列' % (100 * target))
+            if s_all >= target:
+                warn('      全部參數都留著就有 %.1f%% —— 不必丟欄。'
+                     % (100 * s_all))
+                thr = None
+            else:
+                ok = [t for t in levels if _surv(t)[0] >= target]
+                if not ok:
+                    warn('      ❌ 達不到：每個參數都有缺值，連只留最乾淨'
+                         '的那一批，存活率也只有 %.1f%%。'
+                         % (100 * _surv(levels[0])[0]))
+                    warn('      門檻調不出來 —— 用 data.dropna = "none"。')
+                    sys.exit('min_row_keep=%.2f 以丟欄的方式達不到，'
+                             '請改用 dropna="none"。' % target)
+                # ok 是 levels 的前綴（單調性），取最大的那個
+                lo, hi = 0, len(levels) - 1
+                while lo < hi:
+                    mid = (lo + hi + 1) // 2
+                    if _surv(levels[mid])[0] >= target:
+                        lo = mid
+                    else:
+                        hi = mid - 1
+                thr = levels[lo]
+                s_sel, cols_sel = _surv(thr)
+                warn('      門檻 %.4f → 留 %d / %d 參數，列存活 %.1f%%'
+                     % (thr, len(cols_sel), len(sensor_cols), 100 * s_sel))
+                if lo + 1 < len(levels):
+                    s_nx, c_nx = _surv(levels[lo + 1])
+                    warn('      （再放寬到 %.4f 會多留 %d 個參數，'
+                         '但列存活掉到 %.1f%%）'
+                         % (levels[lo + 1], len(c_nx) - len(cols_sel),
+                            100 * s_nx))
+                if thr > 0:
+                    warn('      寫回設定檔：'
+                         '"drop_col_na_frac": %.4f' % thr)
+                else:
+                    warn('      這一檔只有完全無缺值的參數能留。設定檔裡 '
+                         'drop_col_na_frac=0 的意思是「不丟欄」，')
+                    warn('      所以寫不回去 —— 保留 min_row_keep 這個'
+                         '設定即可。')
+        if thr is not None:
             bad = [c for c in sensor_cols if na_frac[c] > thr]
             if bad:
-                warn('    %d 個參數缺值超過 %.0f%%，改丟參數而非丟列：%s'
-                     % (len(bad), 100 * thr,
+                warn('    %d 個參數%s，改丟參數而非丟列：%s'
+                     % (len(bad),
+                        '有缺值' if thr == 0 else '缺值超過 %.0f%%' % (100 * thr),
                         ', '.join('%s(%.0f%%)' % (c, 100 * na_frac[c])
                                   for c in bad[:6])
                         + ('…' if len(bad) > 6 else '')))
