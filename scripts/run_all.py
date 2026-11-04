@@ -56,7 +56,8 @@ TEMPLATE = {
         "abnormal_value": "Abnormal",
         "exclude": [],
         "dropna": "row",
-        "drop_col_na_frac": 0.5
+        "drop_col_na_frac": 0.5,
+        "max_row_loss": 0.3
     },
 
     "reduce": {
@@ -1010,11 +1011,20 @@ def step3_analysis(cfg, graph_path, cand_csv):
     banner(3, '執行分析流程')
 
     sub = {
+        # 步驟 3 讀原始檔（不是步驟 0 的輸出）—— 分析階段要看得到全部
+        # 參數，被縮減丟掉的那些也要能出現在報告裡。Welch 是 O(N)，
+        # 5000 個參數算得動。代價是缺值在這裡重新出現，所以缺值設定
+        # 必須跟著傳下去：原本只傳 5 個鍵，dropna / drop_col_na_frac /
+        # max_row_loss 都被靜默丟掉，於是 run_pipeline 用自己的預設值，
+        # 而它中止時印的「請改 data.dropna」在 run_all 這條路上無效。
         "data": {
             "csv": dc['csv'], "wafer_col": dc['wafer_col'],
             "label_col": dc['label_col'],
             "abnormal_value": dc['abnormal_value'],
-            "exclude": dc.get('exclude', [])
+            "exclude": dc.get('exclude', []),
+            "dropna": dc.get('dropna', 'row'),
+            "drop_col_na_frac": dc.get('drop_col_na_frac', 0.5),
+            "max_row_loss": dc.get('max_row_loss', 0.3)
         },
         "candidates": {
             "file": cand_csv,
