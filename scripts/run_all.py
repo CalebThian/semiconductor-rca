@@ -125,7 +125,8 @@ TEMPLATE = {
         "n_boot": 200,
         "add_statistical": True,
         "expansion": {"enabled": True, "max_hop": 2, "min_effect": None},
-        "graph": {"edge_k": 2, "min_concentration": 0.0, "max_hop": 3},
+        "graph": {"edge_k": 2, "min_concentration": 0.0,
+                  "min_edge": None, "max_hop": 3},
         "rules": {"enabled": True, "test_frac": 0.4, "n_random": 200,
                   "min_gain": 0.02, "gain_metric": "F1", "extend": False},
         "true_roots": []
@@ -509,9 +510,9 @@ def step1_train(cfg, train_csv=None):
         print(msg, flush=True)
 
     W = np.mean(mats, axis=0)
+    js = []
     if stab:
         # 兩兩 Jaccard：衡量不同次訓練選出的邊有多一致
-        js = []
         for a in range(len(mats)):
             for b in range(a + 1, len(mats)):
                 A_, B_ = mats[a] > 0, mats[b] > 0
@@ -563,6 +564,31 @@ def step1_train(cfg, train_csv=None):
     with open(npath, 'w', encoding='utf-8') as f:
         f.write('\n'.join(map(str, names)) + '\n')
     print('節點名稱已存：%s（%d 個）' % (npath, len(names)))
+
+    # 另一個側車檔：W 的值是什麼意思。stability 模式下是「邊的出現頻率」
+    # (0~1)，average 模式下是正規化後的權重 —— 兩者的門檻完全不同一回事
+    # （頻率 0.6 是 stability selection 的常用門檻；權重 0.6 高得離譜）。
+    # 分析端只拿到一個 .npy，猜不出來，於是只能無條件取每列前 k 名，而那
+    # 正是 edge_k 一改結論就翻的原因。把語意寫下來讓它能據此設門檻。
+    mpath = os.path.splitext(gpath)[0] + '_meta.json'
+    meta = {
+        'mode': mode,
+        'value': 'frequency' if stab else 'normalized_weight',
+        'n_seed': n_seed,
+        'task': mc['task'],
+        'stability_edge_k': int(mc.get('stability_edge_k', 2)) if stab else None,
+        'subsample': float(mc.get('subsample', 0.8)) if stab else None,
+        'lambda_sparse': mc.get('lambda_sparse'),
+        'lookback': int(mc['lookback']),
+        'hidden_dim': int(mc['hidden_dim']),
+        'n_nodes': len(names)
+    }
+    if stab and js:
+        meta['jaccard_mean'] = float(np.mean(js))
+        meta['jaccard_min'] = float(np.min(js))
+    with open(mpath, 'w', encoding='utf-8') as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+    print('圖的描述已存：%s（value=%s）' % (mpath, meta['value']))
 
     # ---- 邊清單 ----
     Wm = np.abs(W).copy()

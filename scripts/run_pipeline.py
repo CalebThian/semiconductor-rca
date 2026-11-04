@@ -111,6 +111,7 @@ TEMPLATE = {
         "path": "results/case1_real_graph_task2b.npy",
         "edge_k": 2,
         "min_concentration": 0.0,
+        "min_edge": None,
         "max_hop": 3
     },
     "rules": {
@@ -243,22 +244,59 @@ def calibrate_threshold(X, y, n_perm, seed):
 # 圖
 # =====================================================================
 
-def binarize(W, k, min_conc=0.0):
-    """每個節點取最強的 k 條入邊；集中度未達 min_conc 者視為源頭。
+def binarize(W, k, min_conc=0.0, min_edge=0.0, stats=None):
+    """每個節點取最強的 k 條入邊；低於 min_edge 的邊不算。
+
+    min_edge 是這裡最要緊的參數，而原本沒有 —— 原本無條件取每列前 k
+    名。stability 模式下 W 的值就是「邊的出現頻率」，於是 k 從 1 改成 2
+    時，第二條邊常常是「n_seed 次裡只出現 1 次」的邊，而 np.argsort 對
+    同分者按欄索引排序：一條雜訊邊以任意的順序進入分組，下游結論跟著
+    翻。stability selection 的做法是按出現頻率設門檻（文獻上常取
+    0.6~0.8），而不是按排名取固定條數。
+
+    門檻在前、k 在後：k 只是上限。過了門檻卻超出 k 的邊都是真的穩定邊，
+    不是硬湊出來的。
+
+    同分處理：第 k 與第 k+1 名的值相同時，取誰取決於欄位順序。這裡把同
+    分的一整組都收進來 —— 它們都已過門檻，都站得住腳 —— 結果因此與欄位
+    順序無關。
 
     集中度 = 該列最大權重 / 該列權重總和，尺度無關，可跨列比較。
     外生節點的權重分散，集中度接近 1/(n-1)。
+
+    stats 給一個 dict 就會填入診斷數字（n_root 無入邊的節點數、n_tie 因
+    同分而超出 k 的列數、n_cut 被 min_edge 擋掉的邊數）。
     """
     W = np.abs(np.asarray(W, dtype=float))
     np.fill_diagonal(W, 0.0)
     n = W.shape[0]
     A = np.zeros((n, n), dtype=bool)
+    n_root = n_tie = n_cut = 0
     for i in range(n):
         row, s = W[i], W[i].sum()
         if s <= 0 or row.max() / s < min_conc:
+            n_root += 1
             continue
-        A[i, np.argsort(-row)[:k]] = True
+        cand = np.flatnonzero(row >= min_edge) if min_edge > 0 \
+            else np.flatnonzero(row > 0)
+        n_cut += int((row > 0).sum()) - len(cand)
+        if len(cand) == 0:
+            n_root += 1
+            continue
+        vals = row[cand]
+        order = cand[np.argsort(-vals, kind='stable')]
+        if len(order) > k:
+            # 同分的一整組一起收，否則取誰就看欄位順序
+            cut = row[order[k - 1]]
+            sel = [j for j in order if row[j] >= cut]
+            if len(sel) > k:
+                n_tie += 1
+        else:
+            sel = list(order)
+        A[i, sel] = True
     np.fill_diagonal(A, False)
+    if stats is not None:
+        stats.update(n_root=n_root, n_tie=n_tie, n_cut=n_cut)
     return A, W
 
 
@@ -1193,8 +1231,39 @@ def main():
             emit('     訓練時若用了縮減後的參數，請確認已產生 '
                  '%s' % os.path.basename(npath))
             W = None
+    # ---- 邊的門檻 ----
+    # 門檻該設多少取決於 W 的值是什麼意思，而這件事寫在步驟 1 產生的
+    # _meta.json 裡。stability 模式下值是「邊的出現頻率」，門檻就是
+    # stability selection 的 π（文獻常取 0.6~0.8）；average 模式下值是
+    # 正規化權重，沒有同等的理論依據，所以不自己亂給，維持 0 並說明。
+    min_edge = gc.get('min_edge', None)
+    gmeta = {}
+    if W is not None:
+        mpath = os.path.splitext(gpath)[0] + '_meta.json'
+        if os.path.exists(mpath):
+            try:
+                gmeta = json.loads(read_text_any(mpath))
+            except Exception as e:
+                emit('  （圖的描述檔讀不到：%s）' % e)
+    if min_edge is None:
+        if gmeta.get('value') == 'frequency':
+            min_edge = 0.6
+            emit('  邊門檻：%.2f（圖的值是 %d 次訓練的出現頻率，'
+                 '採 stability selection 的慣用門檻）'
+                 % (min_edge, gmeta.get('n_seed', 0)))
+        else:
+            min_edge = 0.0
+            if W is not None:
+                emit('  邊門檻：0（圖的值不是出現頻率，無從設定頻率門檻）')
+                emit('     mtngc.mode 設成 "stability" 後，每列會只留下'
+                     '穩定出現的邊，結論才不會隨 edge_k 改變。')
+    else:
+        min_edge = float(min_edge)
+        emit('  邊門檻：%.2f（analysis.graph.min_edge 指定）' % min_edge)
+
     if ec.get('enabled', True) and W is not None:
-        A_e, Wa_e = binarize(W, gc['edge_k'], gc['min_concentration'])
+        A_e, Wa_e = binarize(W, gc['edge_k'], gc['min_concentration'],
+                             min_edge)
         A_e = break_cycles(A_e, Wa_e)
         me_exp = ec.get('min_effect', None)
         if me_exp is None:
@@ -1284,7 +1353,40 @@ def main():
         if W is None:
             emit('\n[步驟 6] 無可用的因果圖，略過分組（每個候選自成一組）。')
         else:
-            A, Wa = binarize(W, gc['edge_k'], gc['min_concentration'])
+            bstat = {}
+            A, Wa = binarize(W, gc['edge_k'], gc['min_concentration'],
+                             min_edge, bstat)
+            # edge_k 敏感度：換一個 k，分組會不會變。會變就直接說，不要讓
+            # 一個旋鈕悄悄決定結論 —— 使用者實際遇到的就是 k=1 與 k=2 的
+            # 結論完全不同，而輸出裡看不出那是旋鈕造成的。
+            sens = []
+            for k2 in (gc['edge_k'] - 1, gc['edge_k'] + 1):
+                if k2 < 1:
+                    continue
+                A2, _ = binarize(W, k2, gc['min_concentration'], min_edge)
+                e1 = set(zip(*np.nonzero(A)))
+                e2 = set(zip(*np.nonzero(A2)))
+                un = len(e1 | e2)
+                sens.append((k2, len(e2),
+                             len(e1 & e2) / float(un) if un else 1.0))
+            if bstat.get('n_cut'):
+                emit('  邊門檻擋掉 %d 條邊；%d 個節點因此無入邊（視為源頭）'
+                     % (bstat['n_cut'], bstat['n_root']))
+            if bstat.get('n_tie'):
+                emit('  %d 列在第 %d／%d 名同分，同分的一組全收'
+                     '（否則取誰取決於欄位順序）'
+                     % (bstat['n_tie'], gc['edge_k'], gc['edge_k'] + 1))
+            if sens:
+                emit('  edge_k 敏感度（目前 %d，%d 條邊）：'
+                     % (gc['edge_k'], int(A.sum())))
+                for k2, n2, jac in sens:
+                    emit('    k=%d → %d 條邊，與目前的 Jaccard %.2f%s'
+                         % (k2, n2, jac,
+                            '　⚠️ 結論可能不同' if jac < 0.8 else ''))
+                if min(j for _k, _n, j in sens) < 0.8:
+                    emit('    圖對 edge_k 敏感 —— 報告裡要寫明用的是'
+                         ' k=%d，或提高 min_edge 讓弱邊不進分組。'
+                         % gc['edge_k'])
             A = break_cycles(A, Wa)
             pri = {c: k for k, c in enumerate(cand)}
             groups, _rel = group_candidates(A, cand, pri, gc['max_hop'])
