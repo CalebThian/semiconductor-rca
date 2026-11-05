@@ -121,12 +121,21 @@ TEMPLATE = {
         "test_frac": 0.4,
         "n_quantile": 39,
         "n_random": 200,
-        "max_combo": 2000,
+        # null = 不設限。2000 是列舉改寫成剪枝 DFS 之前的遺物：那時成本
+        # 正比於名目組合數，現在不是（實測 4300 萬組合只走 3 個節點），
+        # 用它當閥只會在不必要時整段略過。工作量改由 enum_max_nodes 直接
+        # 限制。設一個數字仍可擋掉列舉，序貫不受影響。
+        # 注意 max_per_group > 1 時這個值另有用途（決定是否退回每組一個）,
+        # 那裡用的是展開後的組合數，與這裡同名但語意不同。
+        "max_combo": None,
         "min_gain": 0.02,
         "gain_metric": "F1",
         "enum_truncate": True,
         "enum_prune": True,
         "enum_max_rows": 20000,
+        # 工作量的真正上限：走訪的節點數。max_rows 只限制輸出列數，
+        # max_combo 用的名目組合數則與工作量無關。
+        "enum_max_nodes": 2000000,
         "max_per_group": 1,
         "extend": False,
         "extend_when": 1,
@@ -536,7 +545,7 @@ def truncate_combo(combo, stump, names, X, y, gm, min_gain):
 
 def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
                     enum_trunc, prune=True, max_rows=20000, emit=print,
-                    stats=None):
+                    stats=None, max_nodes=2000000):
     """全組合列舉，以前綴共享的深度優先搜尋取代 itertools.product。
 
     與原本的「product + 每個組合跑一次 truncate_combo」結果相同，但避免
@@ -631,10 +640,22 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
                      '驗證誤報率': te['誤報率'],
                      '驗證精確率': te['精確率'], '驗證F1': te['F1']})
 
-    t0 = [time.time(), 0]      # [起始時間, 上次回報的節點數]
+    t0 = [time.time(), 0, False]   # [起始時間, 上次回報的節點數, 已報上限]
 
     def dfs(gi, st):
         n_node[0] += 1
+        # 真正的工作量上限架在這裡。max_rows 只停止輸出列（emit_row 的
+        # return），不會停止展開，所以剪枝失效時 DFS 仍可能無止境地走。
+        # 而「名目組合數」完全不預測工作量 —— 實測 4300 萬組合只走 3 個
+        # 節點 —— 用它當閥會在不必要時整段略過。走訪節點數是直接量。
+        if max_nodes and n_node[0] > max_nodes:
+            if not t0[2]:
+                t0[2] = True
+                emit('    ⚠️ 已走訪 %s 個節點，達 enum_max_nodes 上限，'
+                     '停止展開。' % format(max_nodes, ','))
+                emit('       目前為止的規則仍然有效，但不保證是最佳的。'
+                     '要跑完請調高 rules.enum_max_nodes。')
+            return
         # 節點數可能很大時給個進度，否則長時間沒有輸出看不出是否還在跑
         if n_node[0] - t0[1] >= 500000:
             t0[1] = n_node[0]
@@ -1537,9 +1558,19 @@ def main():
         emit('  組別順序沿用分組結果：%s'
              % ' → '.join('第%d組[%s]' % (k, ','.join(g))
                           for k, g in enumerate(groups_named, 1)))
-        if n_combo > rc['max_combo']:
-            emit('  組合數超過上限 %d，略過。' % rc['max_combo'])
-        else:
+        # 這裡原本是 `if n_combo > max_combo: 略過`，而那個 else 底下裝著
+        # 整個步驟 7 —— 包括逐組序貫選擇。序貫是貪心的，成本是
+        # 組數 × 組員數，跟各組大小的乘積毫無關係，卻一起被擋掉，於是
+        # 組數一多就連一條規則都產不出來。
+        #
+        # 而且乘積也不再預測列舉的成本：全組合列舉改成前綴共享 DFS 加上
+        # 可採上界 F1 <= 2R/(1+R) 的剪枝之後，實測 16 組各 3 個
+        # （名目 4300 萬組合）只走 3 個節點、0.00 秒；刻意構造剪枝最不利
+        # 的資料（異常佔 80%、每個參數幾乎全涵蓋）也一樣。真正的成本上限
+        # 是 enum_max_rows。
+        #
+        # 所以上限移到方案 B 之前，只擋列舉那一段。
+        if True:
             r2 = np.random.RandomState(cfg['seed'])
             itr, ite = [], []
             for lb in (0, 1):
@@ -1708,16 +1739,32 @@ def main():
                 n_combo = int(np.prod([len(o) for o in opts]))
                 if mpg > 1:
                     emit('  每組可取 1~%d 個參數，組合數 %d' % (mpg, n_combo))
-                    if n_combo > rc['max_combo']:
+                    # max_combo 可為 None（不設限）
+                    if rc.get('max_combo') and n_combo > rc['max_combo']:
                         emit('  ⚠️ 超過 max_combo %d，退回每組一個。'
                              % rc['max_combo'])
                         opts = [[(nm,) for nm in g if nm in stump] or [()]
                                 for g in groups_named]
-                rows = enumerate_rules(
-                    opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
-                    enum_trunc, prune=rc.get('enum_prune', True),
-                    max_rows=int(rc.get('enum_max_rows', 20000)), emit=emit,
-                    stats=_ENUM)
+                        # 退回之後組合數變小了，要重算 —— 否則下面會拿
+                        # 退回前的大值去判斷，退了等於沒退。
+                        n_combo = int(np.prod([len(o) for o in opts]))
+                        emit('    退回後組合數 %d' % n_combo)
+                _mc = rc.get('max_combo', None)
+                if _mc and n_combo > _mc:
+                    # 只擋列舉，序貫的結果照樣採用 —— 這兩者的成本無關
+                    emit('  全組合列舉略過：組合數 %d 超過 max_combo %d。'
+                         % (n_combo, _mc))
+                    emit('    上面的序貫結果仍然有效，最終規則就用它。')
+                    emit('    （預設已不設這個上限，工作量由 '
+                         'enum_max_nodes 直接限制。）')
+                    rows = []
+                else:
+                    rows = enumerate_rules(
+                        opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
+                        enum_trunc, prune=rc.get('enum_prune', True),
+                        max_rows=int(rc.get('enum_max_rows', 20000)),
+                        emit=emit, stats=_ENUM,
+                        max_nodes=int(rc.get('enum_max_nodes', 2000000)))
                 _ENUM['combos'] = n_combo
                 if rows:
                     rt = pd.DataFrame(rows).sort_values('驗證F1', ascending=False)
