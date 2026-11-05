@@ -326,6 +326,12 @@ def render_case(d):
                                        else '<td>%s</td>' % esc(r[c])
                                        for c in cols))
                             for i, r in enumerate(rule['enum_top']))))
+        if any(str(r.get('條件數', '')).endswith('*')
+               for r in rule['enum_top']):
+            o.append('<div class="note">條件數標 * 者為保底補上的多參數'
+                     '組合：截斷後整張表只剩單一條件時，忽略增益門檻'
+                     '往下延伸產生，用來顯示多加一個條件的代價。'
+                     '只作對照，不參與最終採用。</div>')
         o.append('<div class="note">「訓練F1」用於挑選，'
                  '「驗證」各欄為效能估計，兩者取自不同的資料切分。</div>')
 

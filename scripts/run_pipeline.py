@@ -136,6 +136,9 @@ TEMPLATE = {
         # 工作量的真正上限：走訪的節點數。max_rows 只限制輸出列數，
         # max_combo 用的名目組合數則與工作量無關。
         "enum_max_nodes": 2000000,
+        # 整張表只剩條件數 1 時，強制補幾筆多參數組合供對照（標 *）。
+        # 0 = 不補。
+        "force_multi": 2,
         "max_per_group": 1,
         "extend": False,
         "extend_when": 1,
@@ -545,7 +548,7 @@ def truncate_combo(combo, stump, names, X, y, gm, min_gain):
 
 def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
                     enum_trunc, prune=True, max_rows=20000, emit=print,
-                    stats=None, max_nodes=2000000):
+                    stats=None, max_nodes=2000000, force_multi=2):
     """全組合列舉，以前綴共享的深度優先搜尋取代 itertools.product。
 
     與原本的「product + 每個組合跑一次 truncate_combo」結果相同，但避免
@@ -609,10 +612,11 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
 
     rows, seen = [], set()
     best = [-1.0]          # 目前最佳訓練指標，用 list 以便在內層函式更新
+    best_st = [None]       # 對應的狀態，供事後強制延伸用
     n_node = [0]
     n_prune = [0]
 
-    def record(st):
+    def record(st, tag=''):
         """st = (conds, cur_m, key, ap, an, bp, bn)，全部沿 DFS 增量累積。"""
         conds, cur_m, key, ap, an, bp, bn = st
         if not conds or key in seen:
@@ -620,6 +624,7 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
         seen.add(key)
         if cur_m > best[0]:
             best[0] = cur_m
+            best_st[0] = st
         if len(rows) >= max_rows:
             return
         # 四個計數都直接取自累積遮罩，不再重建任何全長遮罩
@@ -630,7 +635,7 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
         te = counts_to_eval(tpe, npos_te - tpe, int(bn.sum()),
                             npos_te, nneg_te)
         rows.append({'組合': ' + '.join(nm for nm, _, _ in conds),
-                     '條件數': '%d' % len(conds),
+                     '條件數': '%d%s' % (len(conds), tag),
                      '規則': key,
                      '訓練F1': tr['F1'],
                      '驗證解釋數': te['解釋數'],
@@ -712,6 +717,51 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
 
     sys.setrecursionlimit(max(1000, 50 * len(opts) + 100))
     dfs(0, ([], None, '', None, None, None, None))
+
+    # ---- 保底：至少留一組多參數組合供比較 ----
+    # 截斷加剪枝之下，整張表可能只剩條件數 1 的規則 —— 那時沒有任何
+    # 多參數組合可以對照，看不出「多加一個條件會怎樣」。這裡從最佳的那
+    # 條往下延伸，**忽略增益門檻**，強制產生幾筆。
+    # 它們不參與最終採用（訓練 F1 本來就比較差，比較時自然落敗），只是
+    # 把被截斷掉的那一步的數字補回來，讓截斷這個決定看得見。
+    def _gidx(nm_):
+        for gi_, grp in enumerate(opts):
+            if any(nm_ == x for part in grp for x in part):
+                return gi_
+        return -1
+
+    if force_multi > 0 and best_st[0] is not None:
+        have = max((len(r['組合'].split(' + ')) for r in rows), default=0)
+        if have < 2:
+            conds, cur_m, key, ap, an, bp, bn = best_st[0]
+            used = {_gidx(nm_) for nm_, _, _ in conds}
+            for _ in range(force_multi):
+                cand = None
+                for gi_, grp in enumerate(opts):
+                    if gi_ in used:
+                        continue
+                    for part in grp:
+                        for nm_ in part:
+                            if nm_ not in mp:
+                                continue
+                            p2 = mp[nm_] if ap is None else (ap & mp[nm_])
+                            q2 = mn[nm_] if an is None else (an & mn[nm_])
+                            m2 = metric(int(p2.sum()), int(q2.sum()))
+                            if cand is None or m2 > cand[0]:
+                                cand = (m2, gi_, nm_, p2, q2)
+                if cand is None:
+                    break
+                m2, gi_, nm_, p2, q2 = cand
+                used.add(gi_)
+                conds = conds + [(nm_, stump[nm_][0], stump[nm_][1])]
+                key = seg[nm_] if not key else (key + ' 且 ' + seg[nm_])
+                ap, an = p2, q2
+                bp = ep[nm_] if bp is None else (bp & ep[nm_])
+                bn = en[nm_] if bn is None else (bn & en[nm_])
+                cur_m = m2
+                record((conds, cur_m, key, ap, an, bp, bn), tag='*')
+            emit('    已補上 %d 筆多參數組合（標 *）：忽略增益門檻往下延伸，'
+                 '供對照用。' % force_multi)
     _total = tail[0]
     _acc = n_bound[0] + n_cut[0]
     emit('  列舉：走訪 %d 個節點，產生 %d 條不重複規則%s'
@@ -1788,7 +1838,8 @@ def main():
                         enum_trunc, prune=rc.get('enum_prune', True),
                         max_rows=int(rc.get('enum_max_rows', 20000)),
                         emit=emit, stats=_ENUM,
-                        max_nodes=int(rc.get('enum_max_nodes', 2000000)))
+                        max_nodes=int(rc.get('enum_max_nodes', 2000000)),
+                        force_multi=int(rc.get('force_multi', 2)))
                 _ENUM['combos'] = n_combo
 
                 # 序貫的結果先無條件寫進 RESULT。原本整段 RESULT['rule']
@@ -1830,7 +1881,11 @@ def main():
                     # 任一方都可能較好。
                     # 以訓練集決定採用者 —— 若改看驗證集挑，等於對驗證集過擬合，
                     # 其數字將不再是無偏的效能估計。
-                    enum_best = rt.iloc[0]
+                    # 標 * 的是保底補上的 —— 它們忽略增益門檻才產生，
+                    # 序貫正是因為增益不足而拒絕了它們。讓它們回頭被採用
+                    # 會自相矛盾，所以只當對照，不進最終比較。
+                    _real = rt[~rt['條件數'].astype(str).str.endswith('*')]
+                    enum_best = (_real if len(_real) else rt).iloc[0]
                     emit('')
                     emit('  最終採用（依訓練集 %s 決定）：' % gm)
                     emit('    序貫      訓練 %.3f ／ 驗證 %.3f'
@@ -1881,6 +1936,9 @@ def main():
                     # 條件數 1 的規則看起來像「沒在做組合」，要說明它是
                     # 怎麼來的，否則這張表讀起來就是序貫的劣化重複。
                     _n1 = int((rt['條件數'].astype(str) == '1').sum())
+                    if rt['條件數'].astype(str).str.endswith('*').any():
+                        emit('  標 * 的是保底補上的多參數組合：忽略增益'
+                             '門檻往下延伸，只作對照，不參與最終採用。')
                     if enum_trunc and _n1:
                         emit('  其中 %d 條只有 1 個條件：枚舉從不同的第一個'
                              '參數出發，若加入第二個條件的增益未達 %.3f'
