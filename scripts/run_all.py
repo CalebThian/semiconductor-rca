@@ -94,7 +94,17 @@ TEMPLATE = {
         #
         # 要兩種邊都看就用 task2b（union F1 最高，k=3 時 0.500），代價是
         # 穩定度與單一邊型的還原力都居中。
-        "task": "task2a",
+        #
+        # 但預設回到 task2b：上面那張表是模擬資料，而使用者在真實資料上
+        # 有一個已驗證正確的 task2b 結果。模擬出來的 F1 比不過真實資料上
+        # 對得到答案的結果，改預設等於把那個結果改掉。要用 task2a 請明寫。
+        "task": "task2b",
+        # 只建要用的那個 task 可快約 3 倍，但會改變全域 RNG 的消耗量，
+        # 於是同一個 seed 得到不同的初始化。n_seed=1 時沒有平均，選出的
+        # 邊幾乎全變（實測 top-2 邊 Jaccard 0.111）。所以預設關閉：
+        # 快不該換掉既有結果。n_seed 夠大（10 以上）時再開，那時平均已經
+        # 把單次的隨機性洗掉。
+        "fast_single_task": False,
         "lookback": 3,
         "hidden_dim": 64,
         "lambda_sparse": 0.1,
@@ -555,8 +565,18 @@ def step1_train(cfg, train_csv=None):
             lookback=mc['lookback'], hidden_dim=mc['hidden_dim'],
             lambda_sparse=mc['lambda_sparse'], max_epochs=mc['max_epochs'],
             patience=mc['patience'], output_graph=mc['task'], verbose=False)
-        if _supports_tasks:
+        if _supports_tasks and mc.get('fast_single_task', False):
             kw['tasks'] = (mc['task'],)
+            if r == 0 and n_seed < 10:
+                print('  ⚠️ fast_single_task 已開啟而 n_seed=%d。'
+                      '只建一個 task 會改變 RNG 的消耗，' % n_seed)
+                print('     同一個 seed 會得到不同的圖（實測 top-2 邊'
+                      ' Jaccard 0.111）。要重現舊結果請關掉它。')
+        elif _supports_tasks and r == 0:
+            print('  註：fast_single_task 為 false，會訓練全部 3 個 task '
+                  '卻只用 1 個（慢約 3 倍）。')
+            print('      n_seed 夠大時可設為 true 換取速度，'
+                  '但單一 seed 的結果會與現在不同。')
         elif r == 0:
             print('  註：src/models/mt_ngc_method.py 不支援 tasks 參數，'
                   '會訓練全部 3 個 task 卻只用 1 個（慢約 3 倍）。')

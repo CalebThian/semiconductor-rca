@@ -1315,6 +1315,15 @@ def main():
 
     min_edge = gc.get('min_edge', None)
     gmeta = {}
+    # n_seed=1 時 W 只有 0 與 1 兩種值，每一列的非零全部同分 —— 同分全收
+    # 的規則於是把 stability_edge_k 條邊照單全收，edge_k 完全不起作用。
+    # 這不是錯誤而是沒有資訊可以分辨：一次訓練不足以說哪條邊比較可信。
+    # 但它會讓人以為調 edge_k 有效而其實沒有，所以要說出來。
+    if W is not None and len(np.unique(np.abs(W))) <= 2:
+        warn('  註：圖的值只有兩種（n_seed=1），每列的邊全部同分，'
+             'edge_k 不起作用。')
+        warn('     每個節點會拿到 mtngc.stability_edge_k 條入邊。'
+             '要讓 edge_k 有意義請提高 mtngc.n_seed。')
     if W is not None:
         mpath = os.path.splitext(gpath)[0] + '_meta.json'
         if os.path.exists(mpath):
