@@ -80,6 +80,21 @@ tr.hl td{background:rgba(42,120,214,.07)}
 .bar div{display:flex;align-items:center;justify-content:center;color:#fff;
  font-size:11.5px;white-space:nowrap;overflow:hidden}
 svg{max-width:100%;height:auto}
+/* 分組卡片：固定寬度 + 換行。字級不隨組數變化，30 組和 3 組一樣清楚。 */
+.groups{display:flex;flex-wrap:wrap;align-items:flex-start;gap:12px;
+ margin:12px 0}
+.grp{margin:0;flex:0 1 234px;min-width:0;background:var(--card);
+ border:1px solid var(--line);border-radius:10px;padding:10px 12px}
+.grp figcaption{font-size:12px;color:var(--mut);margin-bottom:6px}
+.grp ul{list-style:none;margin:0;padding:0}
+.grp li{display:flex;align-items:baseline;gap:8px;padding:5px 0 5px 9px;
+ border-left:3px solid var(--c)}
+.grp li+li{border-top:1px dashed var(--line)}
+.grp li.anchor{border-left-width:5px;font-weight:600;padding-left:7px}
+/* 感測器名稱常常很長，讓它換行而不是溢出或被截掉 */
+.grp .nm{flex:1 1 auto;min-width:0;font-size:13px;overflow-wrap:anywhere}
+.grp .tg{flex:0 0 auto;font-size:11px;color:var(--c);white-space:nowrap}
+@media print{.grp{break-inside:avoid}}
 .legend{display:flex;flex-wrap:wrap;gap:14px;font-size:12.5px;color:var(--mut);margin:6px 0}
 .legend span{display:flex;align-items:center;gap:5px}
 .dot{width:10px;height:10px;border-radius:2px;display:inline-block}
@@ -146,40 +161,43 @@ def candidate_table(ct, roots):
             % (head, '\n'.join(body)))
 
 
-def group_diagram(groups):
-    """分組結構圖（SVG）：每組一欄，錨點在上、其餘依標籤排列。"""
+def group_cards(groups):
+    """分組結構：每組一張卡片，自動換行。
+
+    原本是單一 SVG、每組一欄，寬度 = 組數 × 220 + 32，再由
+    `svg{max-width:100%}` 壓回容器寬（1000px）。於是字級隨組數反比縮小：
+
+        4 組 → 縮放 1.00、字 12.5px
+        8 組 → 0.56、7.0px
+       16 組 → 0.28、3.5px
+       30 組 → 0.15、1.9px
+
+    5 組以後就讀不了，而組數是資料決定的，不是版面能控制的。改成每組
+    一張固定寬度的卡片、交給瀏覽器換行，字級就與組數無關 —— 多的是往下
+    長，不是全部縮小。
+
+    順帶解掉三件事：原本 H 取全體最大成員數，一個大組會讓每一欄都留白；
+    參數名超過 180px 會溢出方框且無法截斷；SVG 文字不易選取複製，而這
+    份報告是要拿參數名去 Ctrl+F 和貼到別處用的。
+    """
     if not groups:
         return ''
-    colw, rowh, pad = 220, 46, 16
-    ncol = len(groups)
-    maxm = max(len(g['members']) for g in groups)
-    W = max(ncol * colw + pad * 2, 420)
-    H = maxm * rowh + 60
-    out = ['<svg viewBox="0 0 %d %d" role="img" aria-label="分組結構">' % (W, H)]
-    for gi, g in enumerate(groups):
-        cx = pad + gi * colw + colw / 2
-        out.append('<text x="%.1f" y="20" text-anchor="middle" font-size="12.5" '
-                   'fill="currentColor" opacity=".65">第 %d 組</text>'
-                   % (cx, g['index']))
-        prev_y = None
-        for mi, m in enumerate(g['members']):
-            y = 34 + mi * rowh
+    out = ['<div class="groups">']
+    for g in groups:
+        out.append('<figure class="grp">')
+        out.append('<figcaption>第 %d 組 · %d 個</figcaption>'
+                   % (g['index'], len(g['members'])))
+        out.append('<ul>')
+        for m in g['members']:
             col = TAG_COLOR.get(m['tag'], '#9a968c')
-            if prev_y is not None:
-                out.append('<line x1="%.1f" y1="%d" x2="%.1f" y2="%d" '
-                           'stroke="%s" stroke-width="1.2" opacity=".5"/>'
-                           % (cx, prev_y + 26, cx, y, col))
-            lab = esc(m['name']) + (' ★' if m.get('is_root') else '')
-            out.append('<rect x="%.1f" y="%d" width="180" height="26" rx="6" '
-                       'fill="none" stroke="%s" stroke-width="%s"/>'
-                       % (cx - 90, y, col, '2' if m['tag'] == '錨點' else '1'))
-            out.append('<text x="%.1f" y="%d" text-anchor="middle" '
-                       'font-size="12.5" fill="currentColor">%s</text>'
-                       % (cx, y + 17, lab))
-            out.append('<text x="%.1f" y="%d" font-size="11" fill="%s">%s</text>'
-                       % (cx + 94, y + 17, col, esc(m['tag'])))
-            prev_y = y
-    out.append('</svg>')
+            out.append('<li%s style="--c:%s"><span class="nm">%s%s</span>'
+                       '<span class="tg">%s</span></li>'
+                       % (' class="anchor"' if m['tag'] == '錨點' else '',
+                          col, esc(m['name']),
+                          ' ★' if m.get('is_root') else '',
+                          esc(m['tag'])))
+        out.append('</ul></figure>')
+    out.append('</div>')
     return '\n'.join(out)
 
 
@@ -244,11 +262,11 @@ def render_case(d):
 
     # 分組
     if d.get('groups'):
-        o.append('<h3>分組結構</h3>')
+        o.append('<h3>分組結構（%d 組）</h3>' % len(d['groups']))
         o.append('<div class="legend">%s</div>' % ''.join(
             '<span><i class="dot" style="background:%s"></i>%s</span>'
             % (v, esc(k)) for k, v in TAG_COLOR.items()))
-        o.append(group_diagram(d['groups']))
+        o.append(group_cards(d['groups']))
 
     # 排查順序
     if d.get('order'):
