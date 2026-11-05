@@ -641,6 +641,11 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
                      '驗證精確率': te['精確率'], '驗證F1': te['F1']})
 
     t0 = [time.time(), 0, False]   # [起始時間, 上次回報的節點數, 已報上限]
+    # tail[i] = 第 i 組以後的組合數，用來換算一個子樹代表多少組合
+    tail = [1] * (len(opts) + 1)
+    for i in range(len(opts) - 1, -1, -1):
+        tail[i] = tail[i + 1] * max(len(opts[i]), 1)
+    n_bound, n_cut = [0], [0]
 
     def dfs(gi, st):
         n_node[0] += 1
@@ -690,20 +695,39 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
                 # 且後續各組不再參與 —— 整個子樹都會得到同一條規則。
                 if p2 is not None:
                     record(nst)
+                n_cut[0] += tail[gi + 1]
                 continue
             if prune and p2 is not None:
                 rc_ = int(p2.sum()) / npos_tr
                 if 2 * rc_ / (1 + rc_) <= best[0]:
                     n_prune[0] += 1
+                    # 這個子樹底下所有組合都被上界證明不可能更好。
+                    # 「走訪 N 個節點」看起來像沒試，其實是試了並證明
+                    # 不必展開 —— 把被排除的組合數記下來，那是個保證，
+                    # 不是略過。
+                    n_bound[0] += tail[gi + 1]
                     record(nst)
                     continue
             dfs(gi + 1, nst)
 
     sys.setrecursionlimit(max(1000, 50 * len(opts) + 100))
     dfs(0, ([], None, '', None, None, None, None))
+    _total = tail[0]
+    _acc = n_bound[0] + n_cut[0]
     emit('  列舉：走訪 %d 個節點，產生 %d 條不重複規則%s'
          % (n_node[0], len(seen),
             '，剪枝 %d 個子樹' % n_prune[0] if n_prune[0] else ''))
+    # 「走訪 3 個節點」會讓人以為它根本沒嘗試組合。實際上整個空間都被
+    # 涵蓋了：一部分展開、一部分由上界證明不可能更好、一部分因增益停止
+    # 而截斷（截斷的子樹全部得到同一條規則）。把帳算清楚。
+    if _total > 1:
+        emit('    搜尋空間 %s 個組合：%s 個由上界 F1<=2R/(1+R) 證明'
+             '不可能更好，%s 個因增益不足而截斷。'
+             % (format(_total, ','), format(n_bound[0], ','),
+                format(n_cut[0], ',')))
+        if n_bound[0] and not t0[2]:
+            emit('    被排除的不是「沒試」—— 合取只會讓解釋比例下降，'
+                 '所以那些分支的 F1 上限已低於目前最佳。')
     if len(rows) < len(seen):
         emit('  （表格上限 %d 列，已達上限；完整規則數 %d）'
              % (max_rows, len(seen)))
