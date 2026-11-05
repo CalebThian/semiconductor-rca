@@ -1766,6 +1766,25 @@ def main():
                         emit=emit, stats=_ENUM,
                         max_nodes=int(rc.get('enum_max_nodes', 2000000)))
                 _ENUM['combos'] = n_combo
+
+                # 序貫的結果先無條件寫進 RESULT。原本整段 RESULT['rule']
+                # 只寫在 `if rows:` 裡面 —— 列舉沒跑或沒產生列時，規則就
+                # 完全不進結果檔，HTML 報告於是一片空白，而序貫明明已經
+                # 算出一條可用的規則。列舉有結果時下面再覆蓋。
+                _seq_rule = ' 且 '.join('%s %s %.4g' % c for c in seq_conds)
+                RESULT['rule'] = {
+                    'path': path,
+                    'seq_rule': _seq_rule,
+                    'final_rule': _seq_rule,
+                    'final_source': '序貫',
+                    'metric': gm,
+                    'seq': {'train': seq_tr[gm], 'test': seq_te[gm]},
+                    'test': {k: (float(v) if isinstance(v, (int, float))
+                                 else v) for k, v in seq_te.items()},
+                    'n_test_abnormal': int(yte.sum()),
+                    'n_test_normal': int((yte == 0).sum()),
+                    'max_per_group': mpg,
+                    'enum_truncate': bool(enum_trunc)}
                 if rows:
                     rt = pd.DataFrame(rows).sort_values('驗證F1', ascending=False)
                     rt.to_csv('%s_rules.csv' % prefix, index=False,
@@ -1805,27 +1824,18 @@ def main():
                             100 * final_te['解釋比例'], final_te['誤報數'],
                             100 * final_te['誤報率'], final_te['F1']))
 
-                    RESULT['rule'] = {
-                        'path': path,
-                        'seq_rule': ' 且 '.join('%s %s %.4g' % c
-                                               for c in seq_conds),
+                    RESULT['rule'].update({
                         'enum_top': rt.drop(columns=['規則']).head(5)
                                       .to_dict(orient='records'),
-                        'enum_truncate': bool(enum_trunc),
-                        'max_per_group': mpg,
                         'enum_rule': str(enum_best['規則']),
                         'final_rule': final_rule,
                         'final_source': ('全組合' if enum_best['訓練F1'] >
                                          seq_tr[gm] else '序貫'),
-                        'metric': gm,
-                        'seq': {'train': seq_tr[gm], 'test': seq_te[gm]},
                         'enum': {'train': float(enum_best['訓練F1']),
                                  'test': float(enum_best['驗證F1'])},
                         'test': {k: (float(v) if isinstance(v, (int, float))
                                      else v)
-                                 for k, v in final_te.items()},
-                        'n_test_abnormal': int(yte.sum()),
-                        'n_test_normal': int((yte == 0).sum())}
+                                 for k, v in final_te.items()}})
                     emit('')
                     emit('  全組合列舉（每組取 %s 參數%s）：'
                          % ('一個' if mpg <= 1 else '1~%d 個' % mpg,

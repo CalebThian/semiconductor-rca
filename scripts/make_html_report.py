@@ -274,6 +274,26 @@ def render_case(d):
             '<span class="n">%s</span>' % esc(n) for n in d['order'])
         o.append('<h3>建議排查順序</h3><div class="ord">%s</div>' % chips)
 
+    # 逐組序貫：原本完全沒有呈現。全組合列舉跑不出來（組合數過大而被擋、
+    # 或走到節點上限）時，序貫是唯一有結果的那條路 —— 報告卻整段空白。
+    # 這張表也說明規則是怎麼一步步長出來的，比只給最後一條規則有用。
+    if rule.get('path'):
+        o.append('<h3>逐組序貫選擇</h3>')
+        cols = ['步驟', '組', '選用參數', '條件', '增益', '採納']
+        extra = [c for c in rule['path'][0]
+                 if c.startswith('訓練') and c not in cols]
+        cols = cols[:4] + extra + cols[4:]
+        o.append('<table><tr>%s</tr>%s</table>' % (
+            ''.join('<th class="l">%s</th>' % esc(c) for c in cols),
+            ''.join('<tr class="%s">%s</tr>'
+                    % ('hl' if str(r.get('採納', '')).startswith('是') else '',
+                       ''.join('<td class="l">%s</td>'
+                               % esc(fmt_cell(c, r.get(c, '')))
+                               for c in cols))
+                    for r in rule['path'])))
+        o.append('<div class="note">數字皆為訓練集。增益未達門檻即停止 —— '
+                 '合取條件只會使解釋比例下降、精確率上升。</div>')
+
     # 多變量分析：僅呈現全組合列舉的結果
     if rule.get('enum_top'):
         _mpg = int(rule.get('max_per_group', 1) or 1)
@@ -309,19 +329,16 @@ def render_case(d):
         o.append('<div class="note">「訓練F1」用於挑選，'
                  '「驗證」各欄為效能估計，兩者取自不同的資料切分。</div>')
 
-    # 最佳規則（表中第一列）與涵蓋率
-    if rule.get('enum_rule'):
-        o.append('<h3>最佳規則</h3>')
+    # 最終規則與涵蓋率。改用 final_rule／rule['test'] —— 原本綁在
+    # enum_rule 上，所以列舉沒跑時這一整段（規則、涵蓋率長條、隨機對照）
+    # 都不會出現，即使序貫已經給出一條規則。
+    if rule.get('final_rule'):
+        src = rule.get('final_source', '')
+        o.append('<h3>最終規則%s</h3>'
+                 % ('（%s）' % esc(src) if src else ''))
         o.append('<div class="rule">當 <span class="mono">%s</span> 時，'
-                 '判定為異常</div>' % esc(rule['enum_rule']))
-        en = rule.get('enum', {})
-        top0 = rule['enum_top'][0] if rule.get('enum_top') else {}
-        cov = {'解釋數': top0.get('驗證解釋數', 0),
-               '未解釋數': top0.get('驗證未解釋數', 0),
-               '誤報數': top0.get('驗證誤報數', 0),
-               '解釋比例': top0.get('驗證解釋比例', 0),
-               '誤報率': top0.get('驗證誤報率', 0),
-               'F1': en.get('test', 0)}
+                 '判定為異常</div>' % esc(rule['final_rule']))
+        cov = rule.get('test', {}) or {}
         o.append(coverage_bar({'test': cov}))
         o.append('<div class="note">驗證集共 %d 片異常、%d 片正常；'
                  '解釋比例（Recall）%.1f%%，誤報率（FPR）%.1f%%，'
