@@ -1786,7 +1786,17 @@ def main():
                     'max_per_group': mpg,
                     'enum_truncate': bool(enum_trunc)}
                 if rows:
-                    rt = pd.DataFrame(rows).sort_values('驗證F1', ascending=False)
+                    # 依**訓練** F1 排序。原本排驗證 F1，而下面
+                    # enum_best = rt.iloc[0] 取的就是這個排序的第一名 ——
+                    # 於是「用驗證集挑出候選、再用訓練集去比」，兩個準則
+                    # 打架。本程式自己的註解也寫著用驗證集挑等於對驗證集
+                    # 過擬合。實測（1593 條規則）：排驗證得到訓練 F1
+                    # 0.094 的那條，而列舉裡訓練 F1 最高的是 0.152 ——
+                    # 真正該拿去比的那條根本沒被看到。
+                    # 表格也跟著排訓練 F1：排驗證會把過擬合驗證集的規則
+                    # 擺在最前面給人看。
+                    rt = pd.DataFrame(rows).sort_values(
+                        ['訓練F1', '驗證F1'], ascending=False)
                     rt.to_csv('%s_rules.csv' % prefix, index=False,
                               encoding='utf-8-sig')
                     emit('')
@@ -1844,6 +1854,24 @@ def main():
                                    left_cols=('組合', '條件數')))
                     emit('  「條件數」為該規則實際採納的條件數%s'
                          % ('，截斷後重複的規則已合併。' if enum_trunc else '。'))
+                    # 條件數 1 的規則看起來像「沒在做組合」，要說明它是
+                    # 怎麼來的，否則這張表讀起來就是序貫的劣化重複。
+                    _n1 = int((rt['條件數'].astype(str) == '1').sum())
+                    if enum_trunc and _n1:
+                        emit('  其中 %d 條只有 1 個條件：枚舉從不同的第一個'
+                             '參數出發，若加入第二個條件的增益未達 %.3f'
+                             % (_n1, min_gain))
+                        emit('    就立刻截斷，於是停在長度 1。'
+                             '那不是「沒做組合」，是「這條路一開始就走不下去」。')
+                    if _n1 == len(rt) - 1 or len(rt) <= 3:
+                        emit('  ⚠️ 列舉幾乎只產出序貫已經走過的路徑。'
+                             'enum_truncate 與序貫用同一套增益停止，')
+                        emit('     兩者都截斷時結果會大量重複 —— '
+                             '設 rules.enum_truncate=false 可讓列舉評估'
+                             '完整長度的組合，')
+                        emit('     但合取越多條件解釋比例越低，實測那些'
+                             '長規則的 F1 反而更差。這個比較本身就是結論：'
+                             '序貫已經夠了。')
                     gap = float((rt['訓練F1'] - rt['驗證F1']).mean())
                     emit('  訓練與驗證 F1 平均落差：%.3f' % gap)
                     if gap > 0.15:
