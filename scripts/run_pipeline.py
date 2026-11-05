@@ -109,7 +109,9 @@ TEMPLATE = {
     },
     "graph": {
         "path": "results/case1_real_graph_task2b.npy",
-        "edge_k": 2,
+        "edge_k": 1,
+        "edge_k_large": 2,
+        "large_nodes": 50,
         "min_concentration": 0.0,
         "min_edge": None,
         "max_hop": 3
@@ -1277,6 +1279,40 @@ def main():
     # _meta.json 裡。stability 模式下值是「邊的出現頻率」，門檻就是
     # stability selection 的 π（文獻常取 0.6~0.8）；average 模式下值是
     # 正規化權重，沒有同等的理論依據，所以不自己亂給，維持 0 並說明。
+    # ---- edge_k：小圖用 1，大圖自動升到 2 ----
+    # k=1 每個節點只留一條入邊，圖是一片森林，結論保守、報告也短。參數
+    # 一多就不夠用：節點 N 個、邊也只有 N 條，候選之間連得上的機率隨 N
+    # 下降，分組退化成一堆單人組 —— 那不是「沒有結構」而是預算不夠。
+    #
+    # large_nodes 的值是量出來的，不是猜的。隨機圖、8 個候選、max_hop=3，
+    # 各 150 次，候選落單的比例：
+    #
+    #     節點數      k=1     k=2
+    #        20       14%      0%
+    #        50       47%      4%
+    #       100       66%     17%
+    #       200       82%     38%
+    #       500       91%     69%
+    #      1000       96%     83%
+    #
+    # k=1 在 N=50 就有近半候選落單，所以門檻設在 50。注意 k=2 也只是把
+    # 問題往後推（N=500 時 69%）—— 真正的指標是下面印出的落單比例，不是
+    # 節點數。edge_k_large 設成 null 可關掉自動切換。
+    #
+    # 代價照實說：以模擬資料量測，k=1 的還原力低於 k=2（union F1
+    # task2a .205 vs .352、task1 .295 vs .407）。欄序隨意性在兩個 k 都
+    # 已經是 1.00，不再是選 k 的考量。
+    if W is not None:
+        _klarge = gc.get('edge_k_large', None)
+        _nlarge = int(gc.get('large_nodes', 50) or 0)
+        _n = W.shape[0]
+        if _klarge and _nlarge and _n > _nlarge and gc['edge_k'] < _klarge:
+            warn('  edge_k：%d → %d（節點 %d 個，超過 large_nodes=%d）'
+                 % (gc['edge_k'], int(_klarge), _n, _nlarge))
+            gc = dict(gc, edge_k=int(_klarge))
+        else:
+            warn('  edge_k：%d（節點 %d 個）' % (gc['edge_k'], _n))
+
     min_edge = gc.get('min_edge', None)
     gmeta = {}
     if W is not None:
@@ -1285,22 +1321,22 @@ def main():
             try:
                 gmeta = json.loads(read_text_any(mpath))
             except Exception as e:
-                emit('  （圖的描述檔讀不到：%s）' % e)
+                warn('  （圖的描述檔讀不到：%s）' % e)
     if min_edge is None:
         if gmeta.get('value') == 'frequency':
             min_edge = 0.6
-            emit('  邊門檻：%.2f（圖的值是 %d 次訓練的出現頻率，'
+            warn('  邊門檻：%.2f（圖的值是 %d 次訓練的出現頻率，'
                  '採 stability selection 的慣用門檻）'
                  % (min_edge, gmeta.get('n_seed', 0)))
         else:
             min_edge = 0.0
             if W is not None:
-                emit('  邊門檻：0（圖的值不是出現頻率，無從設定頻率門檻）')
-                emit('     mtngc.mode 設成 "stability" 後，每列會只留下'
+                warn('  邊門檻：0（圖的值不是出現頻率，無從設定頻率門檻）')
+                warn('     mtngc.mode 設成 "stability" 後，每列會只留下'
                      '穩定出現的邊，結論才不會隨 edge_k 改變。')
     else:
         min_edge = float(min_edge)
-        emit('  邊門檻：%.2f（analysis.graph.min_edge 指定）' % min_edge)
+        warn('  邊門檻：%.2f（analysis.graph.min_edge 指定）' % min_edge)
 
     if ec.get('enabled', True) and W is not None:
         A_e, Wa_e = binarize(W, gc['edge_k'], gc['min_concentration'],
@@ -1419,6 +1455,22 @@ def main():
             A = break_cycles(A, Wa)
             pri = {c: k for k, c in enumerate(cand)}
             groups, _rel = group_candidates(A, cand, pri, gc['max_hop'])
+            # 落單比例才是「圖的邊夠不夠」的直接指標，節點數只是它的代理。
+            # 候選各自成組時，報告看起來像「這些參數彼此無關」，但更常見
+            # 的原因是每個節點只有 edge_k 條入邊、連不到彼此。兩者在報告
+            # 上長得一模一樣，所以要把數字說出來。
+            _alone = sum(1 for g in groups if len(g) == 1)
+            if cand:
+                _fr = 100.0 * _alone / len(cand)
+                emit('  分組：%d 個候選 → %d 組，其中 %d 組只有 1 個'
+                     '（%.0f%%）' % (len(cand), len(groups), _alone, _fr))
+                if _fr >= 60:
+                    emit('    ⚠️ 多數候選落單。這可能是真的沒有關聯，也'
+                         '可能是圖的邊不夠 —— 節點 %d 個、每個節點只留'
+                         ' %d 條入邊。' % (len(names), gc['edge_k']))
+                    emit('       把 analysis.graph.edge_k 調高一級再比較'
+                         '分組結果；若落單比例大幅下降，先前那版就是邊'
+                         '不夠而不是無關聯。')
             conc = np.array([np.abs(W[i]).max() / (np.abs(W[i]).sum() + 1e-12)
                              for i in range(len(names))])
             emit('\n[步驟 6] 分組（edge_k=%d, min_concentration=%.3f）'

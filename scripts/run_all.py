@@ -146,8 +146,9 @@ TEMPLATE = {
         "n_boot": 200,
         "add_statistical": True,
         "expansion": {"enabled": True, "max_hop": 2, "min_effect": None},
-        "graph": {"edge_k": 2, "min_concentration": 0.0,
-                  "min_edge": None, "max_hop": 3},
+        "graph": {"edge_k": 1, "edge_k_large": 2, "large_nodes": 50,
+                  "min_concentration": 0.0, "min_edge": None,
+                  "max_hop": 3},
         "rules": {"enabled": True, "test_frac": 0.4, "n_random": 200,
                   "min_gain": 0.02, "gain_metric": "F1", "extend": False},
         "true_roots": []
