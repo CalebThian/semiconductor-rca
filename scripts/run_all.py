@@ -136,6 +136,7 @@ TEMPLATE = {
     "analysis": {
         "script": "scripts/run_pipeline.py",
         "config_out": "config/{train_dataset}_auto.json",
+        "candidates_out": "results/{train_dataset}_candidates.csv",
         "sensor_col": "Sensor",
         "priority_col": "Priority",
         "prefix": "results/{train_dataset}_pipeline",
@@ -243,6 +244,20 @@ def interleaved_blocks(arr, n_blocks):
     seg = [int(edges[i + 1] - edges[i]) for i in range(n_blocks)
            if edges[i + 1] > edges[i]]
     return arr, seg
+
+
+def candidates_path(cfg):
+    """候選檔的固定位置，一律用**原始**資料集名稱。
+
+    同事的輸出檔名帶著他被呼叫時的名稱（case2_reduced 之類），那個名稱
+    得從設定推算，而推算結果會隨步驟 0 走哪條路而改變。步驟 2 跑完就把
+    檔案複製到這裡，下游只認這個路徑 —— 衍生名稱不外流，--from-step 3
+    單獨跑也找得到。
+    """
+    ac = cfg.get('analysis', {}) or {}
+    p = (ac.get('candidates_out', '') or
+         'results/{train_dataset}_candidates.csv')
+    return subst(p, cfg['train_dataset'])
 
 
 def graph_path(cfg):
@@ -422,14 +437,17 @@ def step0_prepare(cfg):
         gc = cc.get('group_col', '') or ''
         cwd = os.path.abspath(subst(cc.get('cwd', '.') or '.',
                                     cfg['train_dataset'], gc))
-        # 同事的輸出檔名用的是他被呼叫時的資料集名稱
-        rel = subst(cc.get('output_csv', '') or '',
-                    colleague_ds(cfg), gc)
-        if rel:
-            auto = rel if os.path.isabs(rel) else os.path.join(cwd, rel)
+        # 先看固定名稱那一份（步驟 2 複製過去的），它不受衍生名稱影響
+        auto = candidates_path(cfg)
+        if not os.path.exists(auto):
+            rel = subst(cc.get('output_csv', '') or '',
+                        colleague_ds(cfg), gc)
+            auto = (rel if os.path.isabs(rel)
+                    else os.path.join(cwd, rel)) if rel else ''
+        if auto:
             if os.path.exists(auto):
                 cand = auto
-                print('候選清單自動沿用同事上一輪的輸出：%s' % auto)
+                print('候選清單自動沿用上一輪的輸出：%s' % auto)
             else:
                 print('（尚無候選清單 —— 第一輪必然如此。'
                       '步驟 2 跑完後，下一輪會自動釘住候選。）')
@@ -1078,7 +1096,19 @@ def step2_colleague(cfg):
     df = read_csv_any(out)
     print('候選輸出：%s' % out)
     print('  %d 列，欄位：%s' % (len(df), ', '.join(map(str, df.columns))))
-    return out
+
+    # 複製一份到以**原始**資料集名稱命名的位置，步驟 3 之後只認這一份。
+    # 同事的輸出檔名用的是他被呼叫時的名稱（case2_reduced / case2_clean），
+    # 那個名稱要從設定重新推算，而推算結果會隨步驟 0 走哪條路而不同 ——
+    # 於是 --from-step 3 單獨跑時算出的名稱和當初步驟 2 用的對不上，檔案
+    # 就找不到。把衍生名稱關在步驟 2 裡面，下游一律用原始名稱，
+    # --from-step 3 才可重現。
+    stable = candidates_path(cfg)
+    if os.path.abspath(stable) != os.path.abspath(out):
+        ensure_dir(stable)
+        shutil.copyfile(out, stable)
+        print('  已複製為固定名稱：%s（步驟 3 讀這一份）' % stable)
+    return stable
 
 
 # =====================================================================
@@ -1225,10 +1255,24 @@ def main():
     _gc = cfg['colleague'].get('group_col', '') or ''
     _ccwd = os.path.abspath(subst(cfg['colleague'].get('cwd', '.') or '.',
                                   ds, _gc))
-    # 候選檔名用的是同事實際被呼叫的資料集名稱，不是原始名稱
-    _co = subst(cfg['colleague']['output_csv'],
-                colleague_ds(cfg), _gc)
-    cand = _co if os.path.isabs(_co) else os.path.join(_ccwd, _co)
+    # 候選檔：優先用原始名稱的固定路徑（步驟 2 會複製過去）。找不到才回頭
+    # 推算同事那邊的檔名 —— 那是這次改動之前跑出來的結果，或步驟 2 還沒跑。
+    cand = candidates_path(cfg)
+    if not os.path.exists(cand):
+        _co = subst(cfg['colleague']['output_csv'],
+                    colleague_ds(cfg), _gc)
+        _legacy = _co if os.path.isabs(_co) else os.path.join(_ccwd, _co)
+        if os.path.exists(_legacy):
+            print('候選檔沿用同事輸出的原位置：%s' % _legacy)
+            print('  （%s 尚未產生；重跑步驟 2 後就會有固定名稱的一份）'
+                  % cand)
+            cand = _legacy
+        elif lo > 2:
+            # 單獨跑步驟 3 而兩個位置都沒有：把兩條路徑都講出來，否則
+            # 使用者只看到「找不到候選檔」卻不知道該去哪裡找。
+            print('⚠️ 兩個位置都找不到候選檔：')
+            print('   固定名稱：%s' % cand)
+            print('   同事輸出：%s' % _legacy)
     result_json = subst(cfg['analysis']['prefix'], ds) + '_result.json'
 
     # 0a 的輸出路徑先備好 —— --from-step 2 時步驟 0 不會跑，但步驟 2
