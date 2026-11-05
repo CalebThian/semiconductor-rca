@@ -99,12 +99,15 @@ TEMPLATE = {
         # 有一個已驗證正確的 task2b 結果。模擬出來的 F1 比不過真實資料上
         # 對得到答案的結果，改預設等於把那個結果改掉。要用 task2a 請明寫。
         "task": "task2b",
-        # 只建要用的那個 task 可快約 3 倍，但會改變全域 RNG 的消耗量，
-        # 於是同一個 seed 得到不同的初始化。n_seed=1 時沒有平均，選出的
-        # 邊幾乎全變（實測 top-2 邊 Jaccard 0.111）。所以預設關閉：
-        # 快不該換掉既有結果。n_seed 夠大（10 以上）時再開，那時平均已經
-        # 把單次的隨機性洗掉。
-        "fast_single_task": False,
+        # true：三個 task 全部訓練，只讀 task 指定的那一張圖。看起來浪費
+        # 三分之二的時間，但建的 predictor 數量決定全域 RNG 被消耗多少，
+        # 所以它也決定了同一個 seed 會得到什麼初始化 —— 要與既有結果一致
+        # 就得照樣建三個。
+        # false：只建要用的那個，快約 3 倍，但同一個 seed 會得到不同的圖
+        # （實測相關係數 0.9655、top-2 邊 Jaccard 0.111 —— 數值接近而選出
+        # 的邊幾乎全變）。n_seed 夠大時平均會洗掉這個差異，那時可以關。
+        # 舊名 fast_single_task 仍可用（意義相反）。
+        "train_all_tasks": True,
         "lookback": 3,
         "hidden_dim": 64,
         "lambda_sparse": 0.1,
@@ -565,18 +568,29 @@ def step1_train(cfg, train_csv=None):
             lookback=mc['lookback'], hidden_dim=mc['hidden_dim'],
             lambda_sparse=mc['lambda_sparse'], max_epochs=mc['max_epochs'],
             patience=mc['patience'], output_graph=mc['task'], verbose=False)
-        if _supports_tasks and mc.get('fast_single_task', False):
+        # 舊名 fast_single_task 的意義相反，兩個都接受
+        if 'train_all_tasks' in mc:
+            _all = bool(mc['train_all_tasks'])
+        elif 'fast_single_task' in mc:
+            _all = not bool(mc['fast_single_task'])
+        else:
+            _all = True
+        if _supports_tasks and not _all:
             kw['tasks'] = (mc['task'],)
-            if r == 0 and n_seed < 10:
-                print('  ⚠️ fast_single_task 已開啟而 n_seed=%d。'
-                      '只建一個 task 會改變 RNG 的消耗，' % n_seed)
-                print('     同一個 seed 會得到不同的圖（實測 top-2 邊'
-                      ' Jaccard 0.111）。要重現舊結果請關掉它。')
+            if r == 0:
+                print('  只訓練 %s（train_all_tasks=false）' % mc['task'])
+                if n_seed < 10:
+                    print('  ⚠️ n_seed=%d 而只建一個 task —— RNG 的消耗量'
+                          '與建三個時不同，' % n_seed)
+                    print('     同一個 seed 會得到不同的圖（實測 top-2 邊'
+                          ' Jaccard 0.111）。要與舊結果一致請設 true。')
         elif _supports_tasks and r == 0:
-            print('  註：fast_single_task 為 false，會訓練全部 3 個 task '
-                  '卻只用 1 個（慢約 3 倍）。')
-            print('      n_seed 夠大時可設為 true 換取速度，'
-                  '但單一 seed 的結果會與現在不同。')
+            print('  訓練全部 3 個 task、只讀 %s 的圖'
+                  '（train_all_tasks=true）' % mc['task'])
+            print('     這不是多餘 —— 建幾個 predictor 決定 RNG 消耗量，'
+                  '也就決定了同一個 seed 的初始化。')
+            print('     設 false 可快約 3 倍，代價是單一 seed 的結果'
+                  '會與現在不同。')
         elif r == 0:
             print('  註：src/models/mt_ngc_method.py 不支援 tasks 參數，'
                   '會訓練全部 3 個 task 卻只用 1 個（慢約 3 倍）。')
