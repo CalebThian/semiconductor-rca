@@ -299,22 +299,20 @@ def render_case(d):
     if rule.get('enum_top'):
         _mpg = int(rule.get('max_per_group', 1) or 1)
         o.append('<h3>多變量分析</h3>')
-        if rule.get('enum_truncate', True):
-            o.append('<div class="note">窮舉每組取%s參數的所有組合，'
-                     '每個組合再依分組順序加入條件、增益不足即截斷，'
-                     '截斷後相同的規則會合併。'
-                     '「條件數」為該規則實際採納的條件數 —— 數字小於組數，'
-                     '表示後面幾組的參數因增益不足被截斷。%s</div>'
-                     % ('一個' if _mpg <= 1 else '1~%d個' % _mpg,
-                        '同組配對也在搜尋範圍內。' if _mpg > 1 else
-                        '同組配對不在搜尋範圍內。'))
-        else:
-            o.append('<div class="note">窮舉每組取%s參數的所有組合，'
-                     '不套用增益停止，一律評估完整長度的規則。'
-                     '條件過多而效能不佳的組合會自然沉到表格下方。%s</div>'
-                     % ('一個' if _mpg <= 1 else '1~%d個' % _mpg,
-                        '同組配對也在搜尋範圍內。' if _mpg > 1 else
-                        '同組配對不在搜尋範圍內。'))
+        # 這段說明原本寫「依分組順序加入條件」，那是可跳過組之前的行為：
+        # 當時每組都必須出一個參數，短規則只能是「第 1..k 組」的前綴。
+        # 現在每組多一個「不選」，任意組的子集都在範圍內，所以描述要改。
+        _same = ('同組配對也在搜尋範圍內。' if _mpg > 1
+                 else '每組最多取一個參數。')
+        o.append('<div class="note">窮舉的範圍是「每組至多取%s參數」的'
+                 '所有子集 —— 可以只用其中幾組，不必每組都出一個。%s%s</div>'
+                 % ('一個' if _mpg <= 1 else '%d個' % _mpg, _same,
+                    '增益不足即停止往下加，截斷後相同的規則會合併。'
+                    if rule.get('enum_truncate', True)
+                    else '不套用增益停止，一律評估到底。'))
+        o.append('<div class="note">下表每個條件數各列最佳的一筆，'
+                 '用來比較「多一個條件換到什麼」—— 通常是誤報率下降、'
+                 '解釋比例也跟著下降。</div>')
         cols = list(rule['enum_top'][0].keys())
         o.append('<table><tr>%s</tr>%s</table>'
                  % (''.join('<th class="l">%s</th>' % esc(c) if c in

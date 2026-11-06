@@ -734,8 +734,11 @@ def enumerate_rules(opts, stump, names, Xtr, ytr, Xte, yte, gm, min_gain,
         return -1
 
     if force_multi > 0 and best_st[0] is not None:
-        have = max((len(r['組合'].split(' + ')) for r in rows), default=0)
-        if have < 2:
+        # 要的是「每個長度都有一筆可以對照」，不是「有沒有多參數規則」。
+        # 原本只在完全沒有多條件規則時才補，於是表上有 2 個條件卻沒有
+        # 3 個條件時，仍然看不出再加一個條件會怎樣。
+        _have = {len(r['組合'].split(' + ')) for r in rows}
+        if any(L not in _have for L in range(2, 2 + force_multi)):
             conds, cur_m, key, ap, an, bp, bn = best_st[0]
             used = {_gidx(nm_) for nm_, _, _ in conds}
             for _ in range(force_multi):
@@ -1903,6 +1906,16 @@ def main():
                         ['訓練F1', '驗證F1'], ascending=False)
                     rt.to_csv('%s_rules.csv' % prefix, index=False,
                               encoding='utf-8-sig')
+                    # 每個條件數各取最佳一筆。整體前 5 名常常全是同一個
+                    # 長度，看不出「多加一個條件換到什麼」—— 而那正是這
+                    # 張表要回答的問題。在這裡算，RESULT 與表格共用。
+                    _rt = rt.copy()
+                    _rt['_n'] = (_rt['條件數'].astype(str)
+                                 .str.rstrip('*').astype(int))
+                    _best_by_len = (_rt.sort_values(['_n', '訓練F1'],
+                                                    ascending=[True, False])
+                                       .groupby('_n', as_index=False).head(1)
+                                       .drop(columns=['_n', '規則']))
                     emit('')
                     # --- 最終採用：以訓練集指標決定，驗證集僅用於報告 ---
                     # 兩種搜尋的空間互不包含：列舉窮舉「一組一個」的所有組合，
@@ -1943,7 +1956,7 @@ def main():
                             100 * final_te['誤報率'], final_te['F1']))
 
                     RESULT['rule'].update({
-                        'enum_top': rt.drop(columns=['規則']).head(5)
+                        'enum_top': _best_by_len.head(6)
                                       .to_dict(orient='records'),
                         'enum_rule': str(enum_best['規則']),
                         'final_rule': final_rule,
@@ -1958,8 +1971,10 @@ def main():
                     emit('  全組合列舉（每組取 %s 參數%s）：'
                          % ('一個' if mpg <= 1 else '1~%d 個' % mpg,
                             '，同樣套用增益停止' if enum_trunc else '，不截斷'))
-                    emit(fmt_table(rt.drop(columns=['規則']).head(5),
+                    emit(fmt_table(_best_by_len.head(6),
                                    left_cols=('組合', '條件數')))
+                    emit('  每個條件數各列最佳一筆，便於比較「多一個條件'
+                         '換到什麼」。')
                     emit('  「條件數」為該規則實際採納的條件數%s'
                          % ('，截斷後重複的規則已合併。' if enum_trunc else '。'))
                     # 條件數 1 的規則看起來像「沒在做組合」，要說明它是
