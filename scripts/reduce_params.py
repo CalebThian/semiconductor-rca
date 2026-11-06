@@ -152,6 +152,11 @@ def parse_args():
     p.add_argument('--hidden', type=int, default=None,
                    help='只用於記憶體估計，預設取 config 的 mtngc.hidden_dim')
     p.add_argument('--out', default=None)
+    p.add_argument('--cand-overflow', choices=('cap', 'keep'),
+                   default='cap',
+                   help='候選數超過 --topk 時：cap 依排名取前 topk 個'
+                        '（預設，topk 是真正的上限）；'
+                        'keep 全部保留（可能超過記憶體上限）。')
     p.add_argument('--out-encoding', default='utf-8',
                    help='輸出 csv 的編碼。預設 utf-8（不含 BOM）。'
                         '要在 Excel 直接開且欄名含中文時用 utf-8-sig，'
@@ -438,17 +443,41 @@ def main():
             score = normal[cols].var(axis=0, ddof=0)
 
         ranked = score.sort_values(ascending=False)
-        # 候選無條件保留，再用排名補滿
-        keep = [c for c in cand if c in cols]
-        n_cand = len(keep)
-        for c in ranked.index:
-            if len(keep) >= args.topk:
-                break
-            if c not in set(keep):
-                keep.append(c)
-        if n_cand:
-            emit('    候選無條件保留 %d 個，排名補滿至 %d 個'
+        # 候選優先保留，再用排名補滿。
+        # 但 topk 是上限而不是下限：它由 min(max_params, 記憶體上限) 算出，
+        # 超過就可能撞回 int32 上限而讓訓練崩潰 —— 那正是這支程式的目的。
+        # 原本的寫法在候選數超過 topk 時，補滿迴圈一次都不跑，keep 就直接
+        # 等於全部候選（實測 --topk 50、候選 120 → 最終保留 120 個，而訊息
+        # 還印著「保留 50 個」）。候選多於 topk 時改成依排名取前 topk 個。
+        _cand_in = [c for c in cand if c in cols]
+        n_cand = len(_cand_in)
+        if n_cand > args.topk and args.cand_overflow == 'cap':
+            _rk = {c: i for i, c in enumerate(ranked.index)}
+            _sorted = sorted(_cand_in, key=lambda c: _rk.get(c, 10 ** 9))
+            _dropped = _sorted[args.topk:]
+            keep = _sorted[:args.topk]
+            emit('    ⚠️ 候選 %d 個超過 topk=%d，依 %s 排名取前 %d 個。'
+                 % (n_cand, args.topk, args.mode, args.topk))
+            emit('       捨棄的 %d 個候選（排名最後者）：%s%s'
+                 % (len(_dropped), ', '.join(map(str, _dropped[:8])),
+                    ' …' if len(_dropped) > 8 else ''))
+            emit('       要全部保留請加 --cand-overflow keep，'
+                 '但參數量可能超過記憶體上限。')
+            n_cand = len(keep)
+        else:
+            keep = list(_cand_in)
+            for c in ranked.index:
+                if len(keep) >= args.topk:
+                    break
+                if c not in set(keep):
+                    keep.append(c)
+        if n_cand and len(keep) != n_cand:
+            emit('    候選優先保留 %d 個，排名補滿至 %d 個'
                  % (n_cand, len(keep)))
+        elif n_cand:
+            emit('    候選 %d 個，%s' % (n_cand,
+                 '已佔滿 topk=%d' % args.topk if len(keep) <= args.topk
+                 else '超過 topk=%d（--cand-overflow keep）' % args.topk))
             # 候選若排名很後面，值得讓使用者知道
             rk = {c: i + 1 for i, c in enumerate(ranked.index)}
             low = [(c, rk[c]) for c in cand if c in rk and rk[c] > args.topk]

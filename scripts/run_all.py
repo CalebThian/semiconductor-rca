@@ -67,6 +67,9 @@ TEMPLATE = {
         "max_params": 300,
         "mem_budget_gb": 2.0,
         "train_na_frac": 0.0,
+        # 候選數超過 max_params 時：cap 依排名取前 max_params 個
+        # （max_params 才是真正的上限），keep 全部保留。
+        "cand_overflow": "cap",
         "clean_out": "",
         "candidates": "",
         "out": "",
@@ -357,7 +360,13 @@ def _run_reduce(cfg, src, out, topk, na_thr, cand, label):
         # 欄名由 analysis.sensor_col 指定，不要讓 reduce_params 去猜
         sc = cfg.get('analysis', {}).get('sensor_col', '') or 'Sensor'
         cmd += ['--cand-col', sc]
-        print('候選清單：%s（欄位 %s，無條件保留）' % (cand, sc))
+        # 候選超過 topk 時怎麼辦。預設 cap：topk 是真正的上限，超過就依
+        # 排名砍掉排後面的候選。設 keep 則全部保留 —— 那會讓 max_params
+        # 失效，參數量可能撞回 int32 上限。
+        ov = (cfg.get('reduce', {}) or {}).get('cand_overflow', 'cap')
+        cmd += ['--cand-overflow', str(ov)]
+        print('候選清單：%s（欄位 %s，優先保留；超過上限時 %s）'
+              % (cand, sc, ov))
     print('[%s] 執行：%s\n' % (label, ' '.join(cmd)))
     r = subprocess.run(cmd)
     if r.returncode != 0:
