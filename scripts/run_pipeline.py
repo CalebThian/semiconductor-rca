@@ -1700,17 +1700,30 @@ def main():
                      '故不以解釋比例當增益指標。')
                 g_of = {nm: gi for gi, grp in enumerate(groups_named, 1)
                         for nm in grp}
-                conds, path, cur = [], [], None
-                for gi, grp in enumerate(groups_named, 1):
-                    cs = [nm for nm in grp if nm in stump]
-                    if not cs:
-                        continue
+                # 每一步在**所有**尚未使用的組裡挑最好的，而不是依組序取
+                # 下一組。原本的寫法有兩個問題疊在一起：依固定組序前進，
+                # 且第一個增益不足的組就 break —— 於是後面的組從來沒被
+                # 看過。實測（真因放在第 1 組與第 7 組、中間都是雜訊）：
+                # 依組序在第 2 組停住，F1 0.547、只找到一個真因；
+                # 改成最佳優先後 F1 0.959，兩個真因都找到。
+                # 現在的「停止」才是真的停止條件：所有剩下的組裡，沒有任何
+                # 參數能帶來足夠增益。
+                conds, path, cur, used = [], [], None, set()
+                while len(used) < len(groups_named):
                     trial = []
-                    for nm in cs:
-                        cd = conds + [(nm, stump[nm][0], stump[nm][1])]
-                        trial.append((nm, eval_rule(apply_rule(Xtr, names, cd),
+                    for gi, grp in enumerate(groups_named, 1):
+                        if gi in used:
+                            continue
+                        for nm in grp:
+                            if nm not in stump:
+                                continue
+                            cd = conds + [(nm, stump[nm][0], stump[nm][1])]
+                            trial.append((nm, gi,
+                                          eval_rule(apply_rule(Xtr, names, cd),
                                                     ytr), cd))
-                    nm, ev, cd = max(trial, key=lambda x: x[1][gm])
+                    if not trial:
+                        break
+                    nm, gi, ev, cd = max(trial, key=lambda x: x[2][gm])
                     gain = ev[gm] if cur is None else ev[gm] - cur[gm]
                     ok = cur is None or gain >= min_gain
                     path.append({'階段': '序貫', '步驟': len(path) + 1, '組': gi,
@@ -1719,10 +1732,12 @@ def main():
                                  '訓練解釋比例': ev['解釋比例'],
                                  '訓練誤報率': ev['誤報率'],
                                  '訓練' + gm: ev[gm], '增益': round(gain, 3),
-                                 '採納': '是' if ok else '否（增益不足，停止）'})
+                                 '採納': '是' if ok
+                                 else '否（已無組能帶來足夠增益，停止）'})
                     if not ok:
                         break
                     conds, cur = cd, ev
+                    used.add(gi)
 
                 # 同組組合搜尋：序貫只採納少數條件時，於該組內枚舉組合。
                 # 用於分辨真根因是集中在同一組，還是分散在不同組。
