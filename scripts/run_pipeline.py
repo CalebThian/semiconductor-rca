@@ -139,6 +139,9 @@ TEMPLATE = {
         # 整張表只剩條件數 1 時，強制補幾筆多參數組合供對照（標 *）。
         # 0 = 不補。
         "force_multi": 2,
+        # 每組多一個「不選」選項，讓列舉能產生跳過某些組的子集。
+        # false = 每組都必須取一個（短規則只會是前綴）。
+        "enum_allow_skip": True,
         "max_per_group": 1,
         "extend": False,
         "extend_when": 1,
@@ -1628,7 +1631,10 @@ def main():
         # 不因來源或 Welch 名次而有先後。
         n_combo = int(np.prod([len(g) for g in groups_named]))
         _SHAPE['g'] = len(groups_named)
-        emit('\n[步驟 7] 合取規則萃取（組合數 %d）' % n_combo)
+        # 這個數字是「每組各取一個」的組合數，也是 max_combo 的判斷依據。
+        # 列舉實際的搜尋空間比它大（每組多一個「不選」），由列舉自己回報
+        # —— 兩個數字不同是正常的，所以標籤要寫明是哪一個。
+        emit('\n[步驟 7] 合取規則萃取（每組各取一個：%d 種）' % n_combo)
         emit('  組別順序沿用分組結果：%s'
              % ' → '.join('第%d組[%s]' % (k, ','.join(g))
                           for k, g in enumerate(groups_named, 1)))
@@ -1825,6 +1831,14 @@ def main():
                     for r in range(1, min(mpg, len(gm_)) + 1):
                         sub.extend(itertools.combinations(gm_, r))
                     opts.append(sub or [()])
+                # 每組加一個「不選」選項。沒有它的話，每條規則都必須
+                # 每組各取一個，短規則只能是「第 1..k 組」的前綴 ——
+                # (第3組, 第7組) 這種配對根本不在搜尋空間裡。序貫改成
+                # 最佳優先之後可以任意挑組，列舉卻不行，兩者就不對等。
+                # 空選項讓空間變成「每組至多一個」的全部子集。
+                if rc.get('enum_allow_skip', True):
+                    opts = [list(o) + [()] if o and o != [()] else o
+                            for o in opts]
                 n_combo = int(np.prod([len(o) for o in opts]))
                 if mpg > 1:
                     emit('  每組可取 1~%d 個參數，組合數 %d' % (mpg, n_combo))
