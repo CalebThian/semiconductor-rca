@@ -251,9 +251,32 @@ def render_case(d):
     # 候選表：直接呈現上游模型的輸出
     roots = set(d.get('true_roots', []))
     ct = d.get('candidate_table')
-    o.append('<h3>候選參數</h3>')
+    # 這張表是同事的檔案原樣呈現，不含圖擴展加進來的參數。分組是對
+    # 「擴展後」的集合做的，所以兩邊的數量不同 —— 48 個候選卻 51 組，
+    # 差的就是擴展。不講的話看起來像哪裡算錯。
+    _by_src = {}
+    for c in d.get('candidates', []):
+        _by_src[c.get('source', '')] = _by_src.get(c.get('source', ''), 0) + 1
+    # 候選檔以外的來源有兩個，不只擴展：
+    #   統計(top-k) / 統計(門檻)  自身 |d| 夠大而補入
+    #   擴展                      在圖上與候選相連、自身也有偏移
+    # 兩者都會進分組與規則，所以一律列出來，不要只講擴展。
+    _added = {k: v for k, v in _by_src.items() if k and k != '指定'}
+    _n_all = len(d.get('candidates', []))
+    _n_file = _by_src.get('指定', 0)
+    o.append('<h3>候選參數%s</h3>'
+             % ('（%d 個）' % _n_all if _n_all else ''))
     if ct:
         o.append(candidate_table(ct, roots))
+        if _added:
+            o.append('<div class="note">上表為上游模型的輸出（%d 個）。'
+                     '另有 %d 個由本流程補入（%s），同樣會進入下方的分組'
+                     '與規則，合計 %d 個 —— 所以分組涵蓋的數量比上表多。'
+                     '</div>'
+                     % (_n_file, _n_all - _n_file,
+                        '、'.join('%s %d 個' % (k, v)
+                                  for k, v in sorted(_added.items())),
+                        _n_all))
     else:
         o.append('<table><tr><th class="l">順序</th>'
                  '<th class="l">參數</th></tr>%s</table>'
@@ -268,7 +291,15 @@ def render_case(d):
 
     # 分組
     if d.get('groups'):
-        o.append('<h3>分組結構（%d 組）</h3>' % len(d['groups']))
+        _nm = sum(len(g.get('members', [])) for g in d['groups'])
+        _alone = sum(1 for g in d['groups'] if len(g.get('members', [])) == 1)
+        o.append('<h3>分組結構（%d 個候選 → %d 組）</h3>'
+                 % (_nm, len(d['groups'])))
+        if _nm and _alone == len(d['groups']):
+            o.append('<div class="note">⚠️ 每一組都只有 1 個成員 —— '
+                     '圖在這些候選之間沒找到任何邊。這可能是它們真的互不'
+                     '相關，也可能是圖太稀疏（邊門檻偏高、edge_k 偏低，'
+                     '或訓練的參數集與候選重疊太少）。</div>')
         o.append('<div class="legend">%s</div>' % ''.join(
             '<span><i class="dot" style="background:%s"></i>%s</span>'
             % (v, esc(k)) for k, v in TAG_COLOR.items()))
