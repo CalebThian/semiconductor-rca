@@ -1934,7 +1934,16 @@ def main():
                          % (seq_tr[gm], seq_te[gm]))
                     emit('    全組合最佳 訓練 %.3f ／ 驗證 %.3f'
                          % (enum_best['訓練F1'], enum_best['驗證F1']))
-                    if enum_best['訓練F1'] > seq_tr[gm]:
+                    # 列舉要贏過 min_gain 才換用，不是贏一點點就換。
+                    # 理由與增益門檻一致：加一個條件若只換到 0.017 的訓練
+                    # F1，我們不接受；那麼「換一條訓練 F1 高 0.017 的規則」
+                    # 同樣不該接受。實測 400 組隨機資料，列舉在訓練集勝出
+                    # 的 21 次平均只贏 0.017，驗證集卻掉 0.080（17/21 變
+                    # 差），條件數由 2.2 漲到 3.2 —— 那是過擬合，不是改進。
+                    # 整體驗證 F1：只用序貫 0.9057、現行準則 0.9015、
+                    # 只用列舉 0.8942、本準則 0.9049。
+                    _switch = enum_best['訓練F1'] - seq_tr[gm]
+                    if _switch > min_gain:
                         final_rule = enum_best['規則']
                         final_te = {'F1': enum_best['驗證F1'],
                                     '解釋數': enum_best['驗證解釋數'],
@@ -1947,7 +1956,12 @@ def main():
                         final_rule = ' 且 '.join('%s %s %.4g' % c
                                                  for c in seq_conds)
                         final_te = seq_te
-                        emit('    → 採用序貫')
+                        if _switch > 0:
+                            emit('    → 採用序貫（列舉雖高 %.3f，'
+                                 '未超過 min_gain=%.3f —— 這種幅度的優勢'
+                                 '在驗證集上通常反轉）' % (_switch, min_gain))
+                        else:
+                            emit('    → 採用序貫')
                     emit('    規則：當 %s 時判定為異常' % final_rule)
                     emit('    驗證集：解釋 %d／未解釋 %d（%.1f%%），'
                          '誤報 %d（%.1f%%），F1 %.3f'
