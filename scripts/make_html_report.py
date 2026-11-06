@@ -230,8 +230,14 @@ def render_case(d):
     cards = [('wafer 數', '%d' % data.get('n_wafer', 0),
               '正常 %d／異常 %d' % (data.get('n_normal', 0),
                                   data.get('n_abnormal', 0))),
-             ('參數總數', '%d' % data.get('n_param', 0), ''),
-             ('候選數', '%d' % len(d.get('candidates', [])), '')]
+             # 三個數字來自三個不同階段、讀不同的檔，差很多是正常的。
+             # 原本只並排「參數總數」與「候選數」而沒說來源，看起來像
+             # 哪裡算錯了 —— 中間「訓練用的縮減集」那一段是斷的。
+             ('參數總數', '%d' % data.get('n_param', 0), '分析：原始檔'),
+             ('圖的節點', '%d' % data.get('n_graph', 0),
+              '訓練：縮減檔'),
+             ('候選數', '%d' % len(d.get('candidates', [])),
+              '同事的 pipeline')]
     if t:
         cards.append(('解釋比例', '%.0f%%' % (100 * float(t.get('解釋比例', 0))),
                       '驗證集'))

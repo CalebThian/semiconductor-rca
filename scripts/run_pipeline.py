@@ -1356,6 +1356,12 @@ def main():
                     gi = np.array([a for a, _ in hit])
                     ai = np.array([b for _, b in hit])
                     Wf[np.ix_(ai, ai)] = W[np.ix_(gi, gi)]
+                    # 把圖的節點數記下來。報告上「參數總數」是步驟 3 讀
+                    # 原始檔的數字、「候選數」是同事挑出來的，中間「訓練
+                    # 用的縮減集」這一段看不到，三者差很多時就會讓人以為
+                    # 哪裡算錯了。
+                    RESULT.setdefault('data', {})['n_graph'] = len(gnames)
+                    RESULT['data']['n_graph_matched'] = len(hit)
                     emit('  圖按名稱對齊：%d / %d 個節點對上'
                          % (len(hit), len(gnames)))
                     if miss:
