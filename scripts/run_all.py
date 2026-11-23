@@ -1335,7 +1335,11 @@ def main():
 
     if lo <= 2 <= hi:
         cand = step2_colleague(cfg)
-    elif lo <= 3 and not os.path.exists(cand):
+    # 條件是「步驟 3 會跑」，不是「lo 小於 3」。寫成 lo <= 3 的話，
+    # --only 1（lo=hi=1）也會進來檢查候選檔 —— 於是只想訓練一張圖就必須
+    # 先有候選檔，而候選檔是步驟 2 的產物。圖明明已經存好了，指令卻回傳
+    # 失敗。穩定度掃描要對每個參數量各訓練一次，正好踩到。
+    elif lo <= 3 <= hi and not os.path.exists(cand):
         sys.exit('跳過步驟 2，但找不到候選檔：%s' % cand)
 
     # 來源檔檢查要跟著「步驟 2 跑過」而不是「步驟 3 要跑」。
