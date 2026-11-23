@@ -1,0 +1,52 @@
+{
+  "train_dataset": "sim",
+  "data": {
+    "csv": "data/raw/semiconductor/sim.csv",
+    "wafer_col": "LOT_ID,WFR_ID,START_DATETIME",
+    "label_col": "Symbol Define",
+    "abnormal_value": "Abnormal",
+    "dropna": "row",
+    "min_row_keep": 0.8
+  },
+  "reduce": {
+    "enabled": true,
+    "mode": "welch",
+    "max_params": 100,
+    "train_na_frac": 0.0,
+    "script": "scripts/reduce_params.py"
+  },
+  "mtngc": {
+    "task": "task2b",
+    "train_all_tasks": false,
+    "mode": "stability",
+    "n_seed": 5,
+    "stability_edge_k": 2,
+    "lookback": 3,
+    "hidden_dim": 64,
+    "lambda_sparse": 0.1,
+    "max_epochs": 30,
+    "patience": 10,
+    "n_blocks": 10,
+    "seed": 0
+  },
+  "analysis": {
+    "script": "scripts/run_pipeline.py",
+    "topk": 8,
+    "true_roots": [
+      "ESC_LEAKAGE_02",
+      "FORELINE_PRESSURE_02",
+      "LINER_TEMP_02"
+    ],
+    "graph": {
+      "edge_k": 1,
+      "edge_k_large": null,
+      "min_edge": null
+    },
+    "rules": {
+      "min_gain": 0.02
+    }
+  },
+  "report": {
+    "enabled": false
+  }
+}
