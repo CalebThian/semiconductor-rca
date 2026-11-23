@@ -367,25 +367,44 @@ def main():
                            'display.width', 200):
         print(df[show].to_string(index=False))
 
-    # 參數的出現率 —— 這是最該看的一欄
+    # 參數的出現率 —— 這是最該看的一段。
+    # 三個欄位要分開看，因為它們的穩定度差很多：候選集是完整清單、規則是
+    # 最小充分集。真根因彼此相關時，規則放了一個之後再加第二個幾乎沒有
+    # 增益，於是它不會進規則 —— 那不代表它不是根因。實測模擬資料：三個
+    # 真根因 100% 都在候選集裡，但其中一個只有 3% 的設定讓它進入規則。
     print('')
     print('=' * 70)
-    print('各參數進入最終規則的比例（%d 組設定）' % len(df))
+    print('各參數的出現率（%d 組設定）' % len(df))
     print('=' * 70)
-    cnt = {}
+    n_run = float(len(df))
+    cnt_rule, cnt_cand, ranks = {}, {}, {}
     for tag, res in results.items():
         for p in rule_params(res):
-            cnt[p] = cnt.get(p, 0) + 1
-    if cnt:
+            cnt_rule[p] = cnt_rule.get(p, 0) + 1
+        for c in (res.get('candidates') or []):
+            cnt_cand[c['name']] = cnt_cand.get(c['name'], 0) + 1
+        for i, p in enumerate(res.get('order') or []):
+            ranks.setdefault(p, []).append(i + 1)
+    if cnt_cand:
         roots = set(next(iter(results.values())).get('true_roots') or [])
-        for p, c in sorted(cnt.items(), key=lambda x: -x[1]):
-            bar = '█' * int(round(20.0 * c / len(df)))
-            print('  %-28s %3d/%-3d %5.0f%%  %-20s%s'
-                  % (str(p)[:28], c, len(df), 100.0 * c / len(df), bar,
+        allp = sorted(set(cnt_cand) | set(cnt_rule),
+                      key=lambda p: (-cnt_cand.get(p, 0),
+                                     np.mean(ranks.get(p, [999]))))
+        print('  %-26s %9s %9s %12s' % ('參數', '進候選', '進規則', '排查名次'))
+        for p in allp[:20]:
+            rr = ranks.get(p, [])
+            print('  %-26s %5d %3.0f%% %5d %3.0f%% %6s%s'
+                  % (str(p)[:26],
+                     cnt_cand.get(p, 0), 100 * cnt_cand.get(p, 0) / n_run,
+                     cnt_rule.get(p, 0), 100 * cnt_rule.get(p, 0) / n_run,
+                     ('%d~%d' % (min(rr), max(rr))) if rr else '-',
                      '  ★真根因' if p in roots else ''))
+        if len(allp) > 20:
+            print('  …另有 %d 個' % (len(allp) - 20))
         print('')
-        print('  出現率 100% 的參數不受設定影響，可以寫進報告；')
-        print('  只在少數設定出現的，是設定造成的，不要當成結論。')
+        print('  「進候選」100% 的參數不受設定影響，是可以寫進報告的結論。')
+        print('  「進規則」偏低不代表不是根因 —— 規則是最小充分集，彼此')
+        print('  相關的參數只會留下一個，其餘的增益不足而被排除。')
 
     # 兩兩一致性
     tags = list(results)
@@ -403,7 +422,14 @@ def main():
         print('=' * 70)
         print('兩兩一致性（%d 對）' % len(rj))
         print('=' * 70)
-        for lab, v in (('規則參數 Jaccard', rj),
+        rc_ = []
+        for i in range(len(tags)):
+            for j in range(i + 1, len(tags)):
+                a_ = {c['name'] for c in (results[tags[i]].get('candidates') or [])}
+                b_ = {c['name'] for c in (results[tags[j]].get('candidates') or [])}
+                rc_.append(jac(a_, b_))
+        for lab, v in (('候選集 Jaccard', rc_),
+                       ('規則參數 Jaccard', rj),
                        ('排查順序 top-5 重疊', ro),
                        ('分組結構 Jaccard', rg)):
             v = [x for x in v if x == x]
