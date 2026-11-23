@@ -75,6 +75,13 @@ import sys
 import numpy as np
 import pandas as pd
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 ENCODINGS = ('utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1')
 
 DEFAULT_META = ['WFR_ID', 'WAFER_ID', 'LOT_ID', 'START_DATETIME', 'END_DATETIME',

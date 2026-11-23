@@ -20,6 +20,13 @@ split_utils.py  ——  Normal 資料的區塊切分(block split)
 import numpy as np
 
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def block_split_indices(n, heldout_frac=0.2, n_blocks=10, lookback=None):
     """把 0..n-1 切成 n_blocks 個連續區塊，間隔取出當 held-out。
 

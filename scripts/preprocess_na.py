@@ -56,6 +56,13 @@ import sys
 import numpy as np
 import pandas as pd
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 # 與 run_pipeline.py 保持一致
 ENCODINGS = ('utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1')
 

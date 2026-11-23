@@ -53,6 +53,13 @@ import sys
 import numpy as np
 import pandas as pd
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
 

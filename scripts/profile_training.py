@@ -40,6 +40,13 @@ import sys
 import time
 
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def say(s=''):
     print(s, flush=True)
 

@@ -39,6 +39,13 @@ import os
 import subprocess
 import sys
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 DATA_EXT = ('.csv', '.tsv', '.npy', '.npz', '.xlsx', '.xls', '.parquet',
             '.pkl', '.pickle', '.h5', '.hdf5', '.feather', '.mat',
             '.db', '.sqlite', '.zip', '.7z', '.tar', '.gz', '.rar')

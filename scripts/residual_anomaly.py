@@ -20,6 +20,13 @@ from src.models.mt_ngc_method import MTNeuralGrangerMethod
 from scipy.stats import rankdata
 from scripts.split_utils import block_split      # 依你的實際擺放位置調整
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def seed_everything(seed):
     np.random.seed(seed)
     import random; random.seed(seed); torch.manual_seed(seed)

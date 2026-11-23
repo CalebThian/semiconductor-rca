@@ -58,6 +58,13 @@ import sys
 import numpy as np
 import pandas as pd
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 # 讓參數名稱看起來像真的 FD 感測器，報告給主管看時比 P0001 可信
 STEMS = [
     'CHAMBER_PRESSURE', 'RF_FWD_PWR', 'RF_REF_PWR', 'BIAS_VOLTAGE',

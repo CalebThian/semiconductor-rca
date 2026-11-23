@@ -34,6 +34,13 @@ import os
 import sys
 import unicodedata
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 ENCODINGS = ('utf-8-sig', 'utf-8', 'cp950', 'big5hkscs', 'gbk', 'latin-1')
 
 META = {'LOT_ID', 'WFR_ID', 'WAFER_ID', 'START_DATETIME', 'END_DATETIME',

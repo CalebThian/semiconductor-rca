@@ -33,6 +33,13 @@ import json
 import os
 import sys
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 TAG_COLOR = {
     '錨點': '#2a78d6',
     '上游': '#7c4dbd',

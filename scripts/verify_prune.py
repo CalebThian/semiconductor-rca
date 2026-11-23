@@ -22,6 +22,13 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import run_pipeline as RP                                    # noqa: E402
 
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def one(ng, gs, T, seed):
     rng = np.random.default_rng(seed)
     nm = ['P%02d' % i for i in range(ng * gs)]

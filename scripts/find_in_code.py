@@ -19,6 +19,13 @@ import re
 import sys
 
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def parse_args():
     p = argparse.ArgumentParser(
         description='在程式碼中搜尋關鍵字（findstr 替代品）')

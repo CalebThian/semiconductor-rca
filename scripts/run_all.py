@@ -45,6 +45,13 @@ import time
 import numpy as np
 import pandas as pd
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 TEMPLATE = {
     "train_dataset": "case1",
 

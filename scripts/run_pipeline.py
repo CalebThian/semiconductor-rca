@@ -45,6 +45,13 @@ import numpy as np
 import pandas as pd
 
 
+
+try:                      # cp950 主控台編不了 emoji，見 _console.py
+    import _console
+    _console.safe_console()
+except Exception:
+    pass
+
 def _w(s):
     """字串的顯示寬度（中文字算 2）。"""
     return sum(2 if unicodedata.east_asian_width(c) in 'WF' else 1
