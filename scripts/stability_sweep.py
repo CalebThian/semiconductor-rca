@@ -105,6 +105,66 @@ def run(cmd, cwd=None, quiet=True):
     return r.returncode, out
 
 
+def make_config(args, work):
+    """由一個 CSV 生出掃描需要的最小設定檔。
+
+    掃描不經過步驟 2（分析端直接呼叫 run_pipeline），所以 run_all --init
+    要求的 colleague.* 欄位在這裡一個都用不到。真正需要的只有資料檔與三個
+    欄位名稱，其餘都有預設值。
+
+    產生的檔會存進 <out>/cfg/base.json，之後可以直接拿去編輯或給 run_all
+    用 —— 不是暫時性的。
+    """
+    csv_path = os.path.abspath(args.csv)
+    if not os.path.exists(csv_path):
+        sys.exit('找不到資料檔：%s' % csv_path)
+    head = pd.read_csv(csv_path, nrows=5, encoding='utf-8-sig')
+    cols = list(head.columns)
+    # 欄名對不上就直接把實際欄名列出來，不要讓它在三步之後才以奇怪的
+    # 形式失敗（例如「沒有標為 Abnormal 的 wafer」）
+    wafer = [c.strip() for c in args.wafer_col.split(',') if c.strip()]
+    miss = [c for c in wafer + [args.label_col] if c not in cols]
+    if miss:
+        sys.exit('資料檔缺少這些欄位：%s\n'
+                 '   實際欄位前 12 個：%s\n'
+                 '   請用 --wafer-col / --label-col 指定正確的欄名。'
+                 % (', '.join(miss), ', '.join(map(str, cols[:12]))))
+    # 標籤要看整欄，不能只看前幾列 —— 資料常依時間排序，開頭整片都是
+    # Normal，用 nrows=5 檢查會誤報「沒有異常值」。只讀這一欄，大檔也便宜。
+    lab = pd.read_csv(csv_path, usecols=[args.label_col],
+                      encoding='utf-8-sig')[args.label_col].astype(str)
+    vc = lab.value_counts()
+    if args.abnormal_value not in vc.index:
+        sys.exit('標籤欄 "%s" 裡沒有 "%s"。實際值與列數：%s\n'
+                 '   請用 --abnormal-value 指定。'
+                 % (args.label_col, args.abnormal_value,
+                    ', '.join('%s(%d)' % (k, v)
+                              for k, v in vc.head(6).items())))
+    ds = os.path.splitext(os.path.basename(csv_path))[0]
+    cfg = {
+        'train_dataset': ds,
+        'data': {'csv': csv_path, 'wafer_col': args.wafer_col,
+                 'label_col': args.label_col,
+                 'abnormal_value': args.abnormal_value},
+        'reduce': {'enabled': True, 'script': os.path.join(HERE,
+                                                           'reduce_params.py')},
+        'mtngc': {'mode': 'stability'},
+        'analysis': {'script': os.path.join(HERE, 'run_pipeline.py'),
+                     'true_roots': [r.strip() for r in
+                                    args.true_roots.split(',') if r.strip()]},
+        'report': {'enabled': False},
+    }
+    out = os.path.join(work, 'cfg', 'base.json')
+    dump_json(cfg, out)
+    n_par = len([c for c in cols if c not in set(wafer) | {args.label_col}])
+    print('已由 %s 產生設定檔：%s' % (os.path.basename(csv_path), out))
+    n_ab = int(vc.get(args.abnormal_value, 0))
+    print('  參數欄位 %d 個　共 %d 列（異常 %d／正常 %d）'
+          % (n_par, len(lab), n_ab, len(lab) - n_ab))
+    print('')
+    return cfg
+
+
 # =====================================================================
 # 第一層：每個參數量訓練一次
 # =====================================================================
@@ -242,7 +302,15 @@ def co_pairs(groups):
 def main():
     ap = argparse.ArgumentParser(
         description='掃描可調參數，量根因分析結論的穩定度')
-    ap.add_argument('--config', required=True, help='run_all 的設定檔')
+    ap.add_argument('--config', help='run_all 的設定檔。'
+                    '沒有的話改用 --csv，本腳本會自己產生一份')
+    ap.add_argument('--csv', help='資料檔。給了就自動產生最小設定檔 —— '
+                    '掃描不跑步驟 2，所以同事 pipeline 的欄位都不需要')
+    ap.add_argument('--wafer-col', default='LOT_ID,WFR_ID,START_DATETIME')
+    ap.add_argument('--label-col', default='Symbol Define')
+    ap.add_argument('--abnormal-value', default='Abnormal')
+    ap.add_argument('--true-roots', default='',
+                    help='已知的真根因，逗號分隔。有的話報告會標示並計算名次')
     ap.add_argument('--out', default='results/stability', help='工作目錄')
     ap.add_argument('--n-params', default='',
                     help='reduce.max_params 的網格，逗號分隔。'
@@ -259,7 +327,13 @@ def main():
     ap.add_argument('--python', default=sys.executable)
     args = ap.parse_args()
 
-    base = load_json(args.config)
+    work = os.path.abspath(args.out)
+    if not args.config and not args.csv:
+        sys.exit('請給 --config，或用 --csv 讓本腳本產生一份設定檔。')
+    if args.config:
+        base = load_json(args.config)
+    else:
+        base = make_config(args, work)
     work = os.path.abspath(args.out)
     for d in ('cfg', 'data', 'graphs', 'runs'):
         p = os.path.join(work, d)
