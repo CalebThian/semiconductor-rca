@@ -489,8 +489,8 @@ def main():
 
     # 兩兩一致性
     tags = list(results)
+    rj, ro, rg, rc_ = [], [], [], []
     if len(tags) > 1:
-        rj, ro, rg = [], [], []
         for i in range(len(tags)):
             for j in range(i + 1, len(tags)):
                 a, b = results[tags[i]], results[tags[j]]
@@ -503,7 +503,6 @@ def main():
         print('=' * 70)
         print('兩兩一致性（%d 對）' % len(rj))
         print('=' * 70)
-        rc_ = []
         for i in range(len(tags)):
             for j in range(i + 1, len(tags)):
                 a_ = {c['name'] for c in (results[tags[i]].get('candidates') or [])}
@@ -524,9 +523,10 @@ def main():
     print('=' * 70)
     print('單一旋鈕的敏感度（固定其他旋鈕，只變動該欄）')
     print('=' * 70)
-    for knob in ('max_params', 'edge_k', 'min_edge', 'min_gain'):
-        others = [c for c in ('max_params', 'edge_k', 'min_edge', 'min_gain')
-                  if c != knob]
+    KNOBS = ('max_params', 'edge_k', 'min_edge', 'min_gain')
+    sens = {}
+    for knob in KNOBS:
+        others = [c for c in KNOBS if c != knob]
         vals = []
         for _key, sub in df.groupby(others):
             if len(sub) < 2:
@@ -536,13 +536,117 @@ def main():
                 for j in range(i + 1, len(ps)):
                     vals.append(jac(ps[i], ps[j]))
         if vals:
+            sens[knob] = float(np.mean(vals))
             print('  %-12s 規則參數 Jaccard 平均 %.3f（%d 對）%s'
-                  % (knob, float(np.mean(vals)), len(vals),
-                     '' if np.mean(vals) >= 0.8 else '   ← 敏感'))
+                  % (knob, sens[knob], len(vals),
+                     '' if sens[knob] >= 0.8 else '   ← 敏感'))
         else:
             print('  %-12s （只有一個值，未掃描）' % knob)
 
+    # ---- 判讀 ----
+    # 前面幾段是數字，這一段是結論。分開寫是因為看數字的人要自己訂門檻、
+    # 自己連結幾個指標，而那些門檻與連結方式是固定的 —— 固定的事就不該
+    # 每次重做一遍。
+    lines = []
+    core = [p for p in cnt_cand if cnt_cand[p] / n_run >= 0.9]
+    core.sort(key=lambda p: np.mean(ranks.get(p, [999])))
+    rule_j = float(np.mean(rj)) if rj else float('nan')
+    cand_j = float(np.mean(rc_)) if rc_ else float('nan')
+    alone = (float(df['落單組'].sum()) / max(float(df['組數'].sum()), 1))
+
+    if core and rule_j >= 0.8:
+        head = '結論穩健：有 %d 個參數在 90%% 以上的設定中都被選為候選，' \
+               '且規則組成一致（Jaccard %.2f）。' % (len(core), rule_j)
+    elif not core:
+        head = '結論不穩：沒有任何參數在 90% 以上的設定中出現。' \
+               '目前的輸出不足以指認根因。'
+    elif rule_j < 0.5:
+        head = '部分穩健：候選層有 %d 個穩定參數，但規則組成隨設定大幅' \
+               '變動（Jaccard %.2f）—— 報候選集，不要只報一條規則。' \
+               % (len(core), rule_j)
+    else:
+        head = '部分穩健：有 %d 個穩定候選，規則組成中等一致' \
+               '（Jaccard %.2f）。' % (len(core), rule_j)
+    lines.append(head)
+    lines.append('')
+
+    if core:
+        lines.append('可以寫進報告的參數（依平均排查名次）：')
+        for p in core[:10]:
+            rr = ranks.get(p, [])
+            lines.append('  %-28s 進候選 %3.0f%%　進規則 %3.0f%%　名次 %s'
+                         % (str(p)[:28], 100 * cnt_cand[p] / n_run,
+                            100 * cnt_rule.get(p, 0) / n_run,
+                            ('%d~%d' % (min(rr), max(rr))) if rr else '-'))
+        if len(core) > 10:
+            lines.append('  …另有 %d 個' % (len(core) - 10))
+        weak = [p for p in cnt_cand
+                if 0 < cnt_cand[p] / n_run < 0.5 and cnt_rule.get(p, 0)]
+        if weak:
+            lines.append('')
+            lines.append('不要寫進報告（只在不到一半的設定出現，'
+                         '卻曾進入規則）：%s'
+                         % ', '.join(sorted(weak)[:6]))
+        lines.append('')
+
+    # 旋鈕建議
+    tune = []
+    low = [(k, v) for k, v in sens.items() if v < 0.8]
+    flat = [k for k, v in sens.items() if v >= 0.999]
+    if low:
+        k, v = min(low, key=lambda x: x[1])
+        tune.append('%s 最會改變結論（Jaccard %.2f）—— 報告的方法章節要'
+                    '說明它為什麼設成現在這個值。' % (k, v))
+    if flat:
+        tune.append('%s 在掃描範圍內完全不影響結果，可以固定不用再調。'
+                    % '、'.join(flat))
+    if tune:
+        lines.append('旋鈕：')
+        for t in tune:
+            lines.append('  ' + t)
+        lines.append('')
+
+    # 警訊
+    warn = []
+    if alone > 0.6:
+        warn.append('有 %.0f%% 的候選落單（自成一組）。可能是真的互不相關，'
+                    '也可能圖太稀疏 —— 把 edge_k 調高一級重跑比較落單比例。'
+                    % (100 * alone))
+    if cand_j == cand_j and cand_j < 0.5:
+        warn.append('候選集本身就不穩（Jaccard %.2f）。先查 analysis.topk '
+                    '與 min_effect，候選不穩的話後面都不用看。' % cand_j)
+    if '真根因在規則內' in df and (df['真根因在規則內'] >= 0).any():
+        g = df.groupby('min_edge').agg(f1=('驗證F1', 'mean'),
+                                       rt=('真根因在規則內', 'mean'))
+        if len(g) > 1 and g['f1'].idxmax() != g['rt'].idxmax():
+            warn.append('驗證 F1 最高的設定（min_edge=%s）不是找到最多真'
+                        '根因的設定（min_edge=%s）—— 不要用 F1 挑設定。'
+                        % (g['f1'].idxmax(), g['rt'].idxmax()))
+    f1sd = float(df['驗證F1'].std())
+    if f1sd == f1sd and f1sd < 0.02:
+        warn.append('驗證 F1 的標準差只有 %.3f —— 效能幾乎不隨設定變動，'
+                    '所以 F1 分辨不出哪組設定比較好，要看上面的出現率。'
+                    % f1sd)
+    if warn:
+        lines.append('要注意：')
+        for w in warn:
+            lines.append('  - ' + w)
+
     print('')
+    print('=' * 70)
+    print('判讀')
+    print('=' * 70)
+    for ln in lines:
+        print(ln)
+
+    vpath = os.path.join(work, 'verdict.txt')
+    with open(vpath, 'w', encoding='utf-8') as f:
+        f.write('穩定度掃描判讀（%d 組設定）\n' % len(df))
+        f.write('=' * 60 + '\n')
+        f.write('\n'.join(lines) + '\n')
+
+    print('')
+    print('判讀已存：%s' % vpath)
     print('明細已存：%s' % csv_path)
     print('各次執行的完整輸出在：%s' % os.path.join(work, 'runs'))
     return 0
